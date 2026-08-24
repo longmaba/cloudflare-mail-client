@@ -27,14 +27,25 @@ class AppViewport {
 		let raf = 0;
 		const measure = () => {
 			this.height = Math.round(vv.height);
-			this.keyboardInset = Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop));
+			// Inset is innerHeight minus vv.height, full stop. The old formula also
+			// subtracted vv.offsetTop — but offsetTop is the caret-reveal PAN, so
+			// the moment iOS shoved the frame the computed inset shrank toward 0
+			// and the pin guard below disarmed itself exactly when it was needed.
+			this.keyboardInset = Math.max(0, Math.round(window.innerHeight - vv.height));
+			pinWindow();
 		};
 		const update = () => {
 			cancelAnimationFrame(raf);
 			raf = requestAnimationFrame(measure);
 		};
-		// iOS auto-scrolls the window on input focus; while the keyboard is up,
-		// pin it back so the frame doesn't get shoved off-screen.
+		// iOS scrolls the window to reveal the caret DURING the keyboard
+		// animation — before the visualViewport resize delivers. A pin that only
+		// listens for scroll events therefore fires while keyboardInset is still
+		// 0, declines, and never gets a second chance: the shove sticks, and the
+		// shell (sized to vv.height) sits a full keyboard too high with an empty
+		// band under it. Hence measure() also pins — the post-resize correction
+		// is the one that actually lands. The app shell owns all scrolling, so
+		// window scroll is never legitimate while the keyboard is up.
 		const pinWindow = () => {
 			if (this.keyboardInset > 0 && (window.scrollY !== 0 || window.scrollX !== 0)) {
 				window.scrollTo(0, 0);
