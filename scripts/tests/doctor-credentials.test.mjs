@@ -44,6 +44,8 @@ function fixture(options = {}) {
     if (path.endsWith('/email/sending/subdomains') && options.sendingCode) {
       return new Response(JSON.stringify({ success: false, errors: [{ code: options.sendingCode, message: `${deploymentToken} ${runtimeToken} account not entitled` }] }), { status: 403 });
     }
+    const routingStatus = path.endsWith('/email/routing') ? options.apexSettingsStatus : path.endsWith('/email/routing/dns') ? options.routingPreviewStatus : undefined;
+    if (routingStatus) return new Response(JSON.stringify({ success: false, errors: [{ code: 10000, message: `${deploymentToken} ${runtimeToken} provider error` }] }), { status: routingStatus });
     let result = {};
     if (path === `/zones/${config.zoneId}`) result = { account: { id: config.accountId }, name: config.zoneName, status: 'active' };
     else if (path.endsWith('/subscriptions')) result = options.subscriptions ?? [{ rate_plan: { id: 'workers_paid' } }];
@@ -52,8 +54,9 @@ function fixture(options = {}) {
     else if (path.endsWith('/consumers')) result = options.consumers ?? [{ type: 'worker', script: config.resourceNames.inbound, dead_letter_queue: config.resourceNames.inboundDlq, settings: { batch_size: 10, max_retries: 5 } }];
     else if (path.endsWith('/queues')) result = [{ queue_name: config.resourceNames.inboundQueue, queue_id: 'inbound-id' }, { queue_name: config.resourceNames.inboundDlq, queue_id: 'dlq-id' }];
     else if (path.endsWith('/email/routing')) result = { enabled: true, status: 'ready' };
+    else if (path.endsWith('/email/routing/dns')) result = [];
     else if (path.endsWith('/email/routing/rules/catch_all')) result = { enabled: true, matchers: [{ type: 'all' }], actions: [{ type: 'worker', value: [config.resourceNames.inbound] }] };
-    else if (path.endsWith('/email/routing/rules')) result = [{ enabled: true, matchers: [{ type: 'literal', field: 'to', value: `admin@${config.mailDomain}` }], actions: [{ type: 'worker', value: [config.resourceNames.inbound] }] }];
+    else if (path.endsWith('/email/routing/rules')) result = options.recipientRules ?? [{ enabled: true, matchers: [{ type: 'literal', field: 'to', value: `admin@${config.mailDomain}` }], actions: [{ type: 'worker', value: [config.resourceNames.inbound] }] }];
     else if (path.endsWith('/email/sending/subdomains')) result = [{ name: config.mailDomain, enabled: true }];
     else if (path.endsWith('/dns_records')) result = [
       { type: 'MX', name: config.zoneName, content: 'aspmx.l.google.com', priority: 1 },
@@ -85,6 +88,41 @@ test('apex routing settings and catch-all diagnostic reads also use the scoped r
   assert.equal(checks.find((check) => check.name === 'Recipient Email Routing').status, 'pass');
   assert.ok(calls.some((call) => call.path.endsWith('/email/routing/rules/catch_all')));
   for (const call of calls.filter((call) => call.path.includes('/email/'))) assert.equal(call.authorization, `Bearer ${runtimeToken}`);
+});
+
+test('pilot runtime scope uses DNS preview and never requires apex settings or implies mailbox readiness', async () => {
+  const { calls, inspect } = fixture({ apexSettingsStatus: 502, recipientRules: [], spfContents: [] });
+  const checks = await inspect();
+  const scope = checks.find((check) => check.name === 'Runtime token scope');
+  assert.equal(scope.status, 'pass');
+  assert.match(scope.detail, /routing DNS preview.*token scope only/);
+  const preview = calls.filter((call) => call.path.endsWith('/email/routing/dns'));
+  assert.equal(preview.length, 1);
+  assert.equal(preview[0].authorization, `Bearer ${runtimeToken}`);
+  assert.ok(!calls.some((call) => call.path.endsWith('/email/routing')));
+  assert.equal(checks.find((check) => check.name === 'Recipient Email Routing').status, 'fail');
+  assert.equal(checks.find((check) => check.name === 'Inbound and sending DNS').status, 'fail');
+});
+
+test('apex runtime scope still requires apex settings and preserves provider failures without DNS-preview fallback', async () => {
+  const { config, calls, inspect } = fixture({ apexSettingsStatus: 502 });
+  config.routingMode = 'apex';
+  config.mailDomain = config.zoneName;
+  const checks = await inspect();
+  assert.equal(checks.find((check) => check.name === 'Runtime token scope').status, 'fail');
+  assert.match(checks.find((check) => check.name === 'Runtime token scope').detail, /HTTP 502.*temporarily unavailable/);
+  assert.equal(checks.find((check) => check.name === 'Recipient Email Routing').status, 'fail');
+  assert.ok(calls.some((call) => call.path.endsWith('/email/routing')));
+  assert.ok(!calls.some((call) => call.path.endsWith('/email/routing/dns')));
+});
+
+test('pilot DNS-preview failure remains a scope failure without retry or apex-settings fallback', async () => {
+  const { calls, inspect } = fixture({ routingPreviewStatus: 502 });
+  const checks = await inspect();
+  assert.equal(checks.find((check) => check.name === 'Runtime token scope').status, 'fail');
+  assert.match(checks.find((check) => check.name === 'Runtime token scope').detail, /HTTP 502.*temporarily unavailable/);
+  assert.equal(calls.filter((call) => call.path.endsWith('/email/routing/dns')).length, 1);
+  assert.ok(!calls.some((call) => call.path.endsWith('/email/routing')));
 });
 
 test('missing runtime credentials fail mail diagnostics without using deployment credentials as fallback', async () => {

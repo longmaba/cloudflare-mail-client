@@ -11,7 +11,7 @@ On Windows with Node 24.12.0 and pnpm 10.26.2:
 | Frozen workspace and infrastructure installs | Passed |
 | Workspace type and Svelte checks | Passed, zero errors and warnings |
 | Application tests | 79 files, 772 tests passed |
-| Portable installer tests | 50 tests passed; migration, credential replacement and live API response coverage |
+| Portable installer tests | 53 tests passed; migration, credential replacement and live API response coverage |
 | Infrastructure TypeScript check | Passed |
 | Production Cloudflare build | Passed |
 | Local D1 migrations | All migrations through `0058` applied |
@@ -95,6 +95,8 @@ observed preview, validate shared DKIM without copying or overwriting it, and
 preserve strict rejection of unexpected names and malformed values. Doctor
 recognizes simple quoted SPF without changing its bytes and reports provider
 outages separately from credential failures.
+Pilot scope checks read the routing DNS preview rather than unrelated apex
+settings; mailbox rules and sending DNS still have independent readiness gates.
 
 A read-only comparison against the original DNS snapshot confirmed all five
 Google apex MX records, the apex SPF record and three existing DKIM records

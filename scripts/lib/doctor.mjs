@@ -96,8 +96,9 @@ export async function inspectInstance(config, secrets, token, { api, fetcher = f
   await check('Runtime token scope', async () => {
     await runtimeApi(`/zones/${config.zoneId}`);
     await runtimeApi(`/zones/${config.zoneId}/dns_records?per_page=1`);
-    await runtimeApi(`/zones/${config.zoneId}/email/routing`);
-    return { status: 'pass', detail: 'Zone, DNS and routing reads allowed. Write permissions are exercised only by deliberate onboarding.' };
+    const routingPath = config.routingMode === 'manual' ? '/email/routing/dns' : '/email/routing';
+    await runtimeApi(`/zones/${config.zoneId}${routingPath}`);
+    return { status: 'pass', detail: `Zone, DNS and ${config.routingMode === 'manual' ? 'routing DNS preview' : 'apex routing settings'} reads allowed. This verifies token scope only; recipient routing and domain DNS readiness are checked separately. Write permissions are exercised only by deliberate onboarding.` };
   });
   await check('Email Sending entitlement', async () => {
     let subscriptions;
