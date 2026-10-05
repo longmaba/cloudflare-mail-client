@@ -8,6 +8,8 @@ import {
   listThreadsSql,
   getCursorSql,
   setCursorSql,
+  getSeedStateSql,
+  setSeedStateSql,
   clearMailboxSql,
   threadSummaryToRow,
   rowToThreadSummary,
@@ -22,6 +24,7 @@ import {
 import type { SeedThreadItem } from "./sync.svelte";
 import { pickBackend } from "./persistence";
 import type { Req, Res } from "./rpc";
+import { SEED_THREAD_LIMIT } from "$lib/shared/thread-mirror-limits";
 
 let db: any = null;
 let backend: Awaited<ReturnType<typeof pickBackend>> | null = null;
@@ -39,7 +42,7 @@ async function open(userId: string): Promise<void> {
 }
 
 // Methods that skip the persist step: reads, open (snapshot just loaded), clear (db nulled).
-const NO_PERSIST_METHODS = new Set(["list", "getCursor", "open", "listThreadItems", "getThreadSync"]);
+const NO_PERSIST_METHODS = new Set(["list", "getCursor", "getSeedState", "open", "listThreadItems", "getThreadSync"]);
 
 // IDB-tier persist exports the ENTIRE database (sqlite3_js_db_export) — with a
 // seeded mailbox that's multi-MB per call, so per-write persistence made every
@@ -74,6 +77,12 @@ const handlers: Record<string, (params: any) => unknown | Promise<unknown>> = {
         db.exec({ sql: upsertThreadSql().sql, bind: threadSummaryToRow(mailboxId, summary) });
       }
       db.exec({ sql: setCursorSql().sql, bind: { $mailbox_id: mailboxId, $cursor: cursor } });
+      // A seed at the cap may omit older threads in any folder. Delta cursors
+      // and optimistic rows cannot prove that this all-folder snapshot is full.
+      db.exec({
+        sql: setSeedStateSql().sql,
+        bind: { $mailbox_id: mailboxId, $complete: rows.length < SEED_THREAD_LIMIT ? 1 : 0 },
+      });
     });
     return true;
   },
@@ -128,6 +137,12 @@ const handlers: Record<string, (params: any) => unknown | Promise<unknown>> = {
     const resultRows: any[] = [];
     db.exec({ sql: getCursorSql().sql, bind: { $mailbox_id: mailboxId }, rowMode: "object", resultRows });
     return resultRows[0]?.cursor ?? null;
+  },
+
+  getSeedState: ({ mailboxId }: { mailboxId: string }) => {
+    const resultRows: any[] = [];
+    db.exec({ sql: getSeedStateSql().sql, bind: { $mailbox_id: mailboxId }, rowMode: "object", resultRows });
+    return resultRows[0] ? { complete: !!resultRows[0].complete } : null;
   },
 
   seedThreadItems: ({

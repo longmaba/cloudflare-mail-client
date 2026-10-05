@@ -2,13 +2,18 @@
 import { describe, it, expect, vi } from "vitest";
 import { createSync } from "$lib/client/localdb/sync.svelte";
 import type { ThreadSummary } from "@doota/mail-core/read";
+import { SEED_THREAD_LIMIT } from "$lib/shared/thread-mirror-limits";
 
 // ---------------------------------------------------------------------------
 // Fake helpers
 // ---------------------------------------------------------------------------
 
-function makeLocalDbFake(initialCursor: number | null = null) {
+function makeLocalDbFake(
+  initialCursor: number | null = null,
+  initialSeedState: { complete: boolean } | null = initialCursor === null ? null : { complete: true },
+) {
   let storedCursor = initialCursor;
+  let seedState = initialSeedState;
   const seedCalls: { mailboxId: string; rows: ThreadSummary[]; cursor: number }[] = [];
   const applyDeltasCalls: {
     mailboxId: string;
@@ -21,8 +26,12 @@ function makeLocalDbFake(initialCursor: number | null = null) {
     async getCursor(_mailboxId: string): Promise<number | null> {
       return storedCursor;
     },
+    async getSeedState(_mailboxId: string) {
+      return seedState;
+    },
     async seed(mailboxId: string, rows: ThreadSummary[], cursor: number): Promise<void> {
       storedCursor = cursor;
+      seedState = { complete: rows.length < SEED_THREAD_LIMIT };
       seedCalls.push({ mailboxId, rows, cursor });
     },
     async applyDeltas(
@@ -65,6 +74,55 @@ const FAKE_THREAD: ThreadSummary = {
 // ---------------------------------------------------------------------------
 
 describe("createSync", () => {
+  it("a first realtime event seeds the whole mailbox instead of creating a delta-only cursor", async () => {
+    const fakeDb = makeLocalDbFake(null);
+    const rows = Array.from({ length: 30 }, (_, index) => ({ ...FAKE_THREAD, threadId: `t${index}` }));
+    const seedFn = vi.fn(async () => ({ rows, cursor: 42 }));
+    const changesFn = vi.fn(async () => ({
+      upserts: [FAKE_THREAD], removals: [], newSeq: 43, cannotCalculate: false,
+    }));
+    const sync = createSync({ localdb: fakeDb as any, seedFn, changesFn });
+
+    await sync.onRealtime("mb_test");
+
+    expect(changesFn).not.toHaveBeenCalled();
+    expect(fakeDb.seedCalls[0].rows).toHaveLength(30);
+    expect(fakeDb.applyDeltasCalls).toHaveLength(0);
+    expect(sync.state).toBe("live");
+  });
+
+  it("reseeds legacy delta-only caches even when they already have a cursor", async () => {
+    const fakeDb = makeLocalDbFake(12, null);
+    const seedFn = vi.fn(async () => ({ rows: [FAKE_THREAD], cursor: 42 }));
+    const changesFn = vi.fn();
+    const sync = createSync({ localdb: fakeDb as any, seedFn, changesFn });
+
+    await sync.ensure("mb_test");
+
+    expect(seedFn).toHaveBeenCalledOnce();
+    expect(changesFn).not.toHaveBeenCalled();
+    expect(fakeDb.storedCursor).toBe(42);
+    expect(sync.state).toBe("live");
+  });
+
+  it("retries a failed seed on realtime without applying partial deltas", async () => {
+    const fakeDb = makeLocalDbFake(null);
+    const seedFn = vi.fn()
+      .mockRejectedValueOnce(new Error("interrupted seed"))
+      .mockResolvedValueOnce({ rows: [FAKE_THREAD], cursor: 42 });
+    const changesFn = vi.fn();
+    const sync = createSync({ localdb: fakeDb as any, seedFn, changesFn });
+
+    await sync.ensure("mb_test");
+    expect(sync.state).toBe("error");
+    await sync.onRealtime("mb_test");
+
+    expect(seedFn).toHaveBeenCalledTimes(2);
+    expect(changesFn).not.toHaveBeenCalled();
+    expect(fakeDb.seedCalls).toHaveLength(1);
+    expect(sync.state).toBe("live");
+  });
+
   it("ensure() on empty store seeds then reaches 'live'", async () => {
     const fakeDb = makeLocalDbFake(null);
     const seedFn = vi.fn(async (_mailboxId: string) => ({

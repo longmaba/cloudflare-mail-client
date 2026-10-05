@@ -67,11 +67,10 @@ export async function buildChanges(
   db: Db,
   ctx: Ctx & { sinceSeq: number },
 ): Promise<{ upserts: ThreadSummary[]; removals: string[]; newSeq: number; cannotCalculate: boolean }> {
-  // ponytail: single page per call — changesSince caps at 500 and we drop hasMore;
-  // the next realtime event/ensure drains the rest. Loop while hasMore if large
-  // silent catch-ups ever matter.
+  // The client treats a successful delta as caught up. If the 500-event page
+  // is truncated, reseed now rather than depend on another realtime push.
   const res = await changesSince(db, ctx.mailboxId, ctx.sinceSeq);
-  if (res.cannotCalculateChanges) return { upserts: [], removals: [], newSeq: ctx.sinceSeq, cannotCalculate: true };
+  if (res.cannotCalculateChanges || res.hasMore) return { upserts: [], removals: [], newSeq: ctx.sinceSeq, cannotCalculate: true };
 
   // Map change_log entries → affected thread ids. Email changes → their threadId;
   // Thread changes → objectId directly. (EmailSubmission/Mailbox ignored for the
@@ -153,7 +152,7 @@ export async function buildThreadMessageChanges(
   ctx: ThreadCtx & { sinceSeq: number },
 ): Promise<{ upserts: MirroredMessage[]; removals: string[]; newSeq: number; cannotCalculate: boolean }> {
   const res = await changesSince(db, ctx.mailboxId, ctx.sinceSeq);
-  if (res.cannotCalculateChanges) {
+  if (res.cannotCalculateChanges || res.hasMore) {
     return { upserts: [], removals: [], newSeq: ctx.sinceSeq, cannotCalculate: true };
   }
 

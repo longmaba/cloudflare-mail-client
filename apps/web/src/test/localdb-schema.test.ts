@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, it, expect, beforeEach } from "vitest";
 import sqlite3InitModule from "@sqlite.org/sqlite-wasm";
-import { DDL, upsertThreadSql, deleteThreadSql, listThreadsSql, threadSummaryToRow, rowToThreadSummary } from "$lib/client/localdb/schema";
+import { DDL, upsertThreadSql, deleteThreadSql, listThreadsSql, threadSummaryToRow, rowToThreadSummary, getSeedStateSql, setSeedStateSql, setCursorSql } from "$lib/client/localdb/schema";
 
 // A ThreadSummary fixture (shape from @doota/mail-core/read).
 const summary = (over: Partial<any> = {}) => ({
@@ -18,6 +18,31 @@ beforeEach(async () => {
 });
 
 describe("localdb schema", () => {
+  const readSeedState = (mailboxId: string) => {
+    const out: any[] = [];
+    db.exec({ sql: getSeedStateSql().sql, bind: { $mailbox_id: mailboxId }, rowMode: "object", resultRows: out });
+    return out[0] ?? null;
+  };
+
+  it("a legacy cursor does not create seed completeness when the cache schema opens again", () => {
+    db.exec({ sql: setCursorSql().sql, bind: { $mailbox_id: "mb_a", $cursor: 12 } });
+    db.exec(DDL);
+
+    expect(readSeedState("mb_a")).toBeNull();
+  });
+
+  it("preserves full-seed completeness separately from subsequent cursor updates", () => {
+    db.exec({ sql: setSeedStateSql().sql, bind: { $mailbox_id: "mb_a", $complete: 1 } });
+    db.exec({ sql: setCursorSql().sql, bind: { $mailbox_id: "mb_a", $cursor: 42 } });
+    db.exec(DDL);
+
+    expect(readSeedState("mb_a")).toEqual({ complete: 1 });
+    expect(readSeedState("mb_b")).toBeNull();
+
+    db.exec({ sql: setSeedStateSql().sql, bind: { $mailbox_id: "mb_a", $complete: 0 } });
+    expect(readSeedState("mb_a")).toEqual({ complete: 0 });
+  });
+
   it("upserts a ThreadSummary and reads it back by mailbox+placement", () => {
     const row = threadSummaryToRow("mb_a", summary());
     db.exec({ sql: upsertThreadSql().sql, bind: row });

@@ -8,7 +8,7 @@
 // meaning Svelte templates that read them will auto-re-render on seed writes.
 
 import type { ThreadSummary } from "@doota/mail-core/read";
-import type { TimelineItem } from "./schema";
+import type { MailboxSeedState, TimelineItem } from "./schema";
 import type { SeedThreadItem } from "./sync.svelte";
 import { watch } from "runed";
 import { createBridge } from "./rpc";
@@ -22,6 +22,8 @@ export type { TimelineItem };
 export type LiveThreadList = {
   /** The most recently fetched list for (mailboxId, folder). $state-backed. */
   readonly current: ThreadSummary[];
+  /** True only after an uncapped full-mailbox seed, including on offline boot. */
+  readonly complete: boolean;
   /** Release the watcher registration — call when the consumer unmounts. */
   destroy(): void;
 };
@@ -99,6 +101,10 @@ export function makeLocalDb(bridge: Bridge) {
       return bridge.call<number | null>("getCursor", { mailboxId });
     },
 
+    getSeedState(mailboxId: string): Promise<MailboxSeedState | null> {
+      return bridge.call<MailboxSeedState | null>("getSeedState", { mailboxId });
+    },
+
     /** Optimistic quick-action patch: upsert/remove rows without moving the
      * sync cursor (the next real delta reconciles server truth), then refresh
      * the list watchers so the mirror-driven render reacts instantly.
@@ -134,20 +140,32 @@ export function makeLocalDb(bridge: Bridge) {
     ): LiveThreadList {
       // ponytail: $state in .svelte.ts so Svelte templates auto-track reads.
       let current = $state<ThreadSummary[]>([]);
+      let complete = $state(false);
+      let refreshVersion = 0;
 
       const watcher: Watcher = {
         get mailboxId() {
           return getMailboxId();
         },
         async refresh() {
-          const freshRows = await facade.list(getMailboxId(), getFolder());
+          const mailboxId = getMailboxId();
+          const folder = getFolder();
+          const version = ++refreshVersion;
+          const [freshRows, seedState] = await Promise.all([
+            facade.list(mailboxId, folder),
+            facade.getSeedState(mailboxId),
+          ]);
+          if (version !== refreshVersion || mailboxId !== getMailboxId() || folder !== getFolder()) return;
           current = freshRows; // $state write — triggers component re-render
+          complete = seedState?.complete === true;
         },
       };
 
       const handle: LiveThreadList = {
         get current() { return current; },
+        get complete() { return complete; },
         destroy() {
+          refreshVersion++;
           watchers.delete(watcher);
         },
       };
@@ -164,6 +182,7 @@ export function makeLocalDb(bridge: Bridge) {
       // async) — swallow that rejection; open() re-reads once it is.
       watch([getMailboxId, getFolder], () => {
         current = [];
+        complete = false;
         void watcher.refresh().catch(() => {});
       });
 

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import * as schema from "@doota/db/schema";
 import { domainOf, senderAddress } from "@doota/db/org-domains";
@@ -42,12 +42,33 @@ export function isElevatedRole(role?: string | null): boolean {
 }
 
 /**
- * True when an elevated account's session says TOTP 2FA is off — the state that
- * lets bare credentials sign in with no second factor. Cheap (session field
- * only); used by hooks to reopen onboarding even after onboardedAt is stamped.
+ * A coarse session hint only. Enforcement below reads current D1 roles,
+ * administrator memberships and enrollment; cached session flags cannot grant
+ * access after a promotion or TOTP disable.
  */
 export function hasSecurityDebt(user: SessionUser): boolean {
   return isElevatedRole(user.role) && !user.twoFactorEnabled;
+}
+
+/** Organization roles grant trusted access independently of the global role. */
+async function securitySnapshot(db: DrizzleD1Database<typeof schema>, userId: string) {
+  const [fresh, administratorMembership] = await Promise.all([
+    db.query.user.findFirst({
+      where: eq(schema.user.id, userId),
+      columns: {
+        role: true,
+        twoFactorEnabled: true,
+        recoveryEmail: true,
+        recoveryEmailVerified: true,
+        mustChangePassword: true,
+      },
+    }),
+    db.query.member.findFirst({
+      where: and(eq(schema.member.userId, userId), inArray(schema.member.role, ["owner", "admin"])),
+      columns: { id: true },
+    }),
+  ]);
+  return { fresh, isElevated: isElevatedRole(fresh?.role) || !!administratorMembership };
 }
 
 export type OrgTwoFactorGate =
@@ -56,20 +77,21 @@ export type OrgTwoFactorGate =
   | { kind: "block" }; // deadline passed, TOTP still off → block interactive access
 
 /**
- * Org-wide 2FA mandate check (Phase C), evaluated per request in the guard for
- * users who haven't enrolled TOTP. Resolves the user's active org (the session
- * value, else their first mailbox's org, else their first membership) and reads
- * its mandate. `block` past the grace deadline; `grace` before it (the UI nudges
- * but access continues). Cheap: only called when twoFactorEnabled is false, and
- * a no-op the moment the user enrolls. API keys never reach here (they bypass
- * the interactive guard), so they're exempt by construction.
+ * Interactive TOTP gate, evaluated on every authenticated application request.
+ * Current global admins and owners/admins of any organization have no grace
+ * period. Ordinary members use their active organization's optional mandate.
+ * D1 enrollment is authoritative even when a browser cookie reports otherwise.
+ * API keys do not use this interactive session guard.
  */
 export async function orgTwoFactorGate(
   db: DrizzleD1Database<typeof schema>,
   user: SessionUser,
   activeOrganizationId?: string | null,
 ): Promise<OrgTwoFactorGate> {
-  if (user.twoFactorEnabled) return { kind: "none" };
+  const { fresh, isElevated } = await securitySnapshot(db, user.id);
+  if (!fresh) return { kind: "block" };
+  if (fresh.twoFactorEnabled) return { kind: "none" };
+  if (isElevated) return { kind: "block" };
 
   let orgId = activeOrganizationId ?? null;
   if (!orgId) {
@@ -120,7 +142,7 @@ const DONE: OnboardingStatus = { steps: [], complete: true, nextStep: null };
  *
  * Reads the gating flags fresh from D1 (never the 5-minute session cookie cache),
  * so a just-completed step isn't reported stale and bounce the user in a loop.
- * Callers that already know `user.onboardedAt` is set should skip this (fast path).
+ * The completed-onboarding fast path follows the current security checks.
  */
 export async function getOnboardingStatus(
   db: DrizzleD1Database<typeof schema>,
@@ -129,25 +151,12 @@ export async function getOnboardingStatus(
    * enroll TOTP too, so reopen secure-account for them like an elevated debt. */
   mustEnroll2fa = false,
 ): Promise<OnboardingStatus> {
-  // Reopen onboarding when elevated or org-mandated TOTP is disabled.
-  const mustSecure = hasSecurityDebt(user) || mustEnroll2fa;
-  if (user.onboardedAt && !mustSecure) return DONE;
-
-  const role = user.role ?? "member";
-  const isElevated = isElevatedRole(role);
-
-  const fresh = await db.query.user.findFirst({
-    where: eq(schema.user.id, user.id),
-    columns: {
-      twoFactorEnabled: true,
-      recoveryEmail: true,
-      recoveryEmailVerified: true,
-      mustChangePassword: true,
-    },
-  });
-
+  const { fresh, isElevated } = await securitySnapshot(db, user.id);
+  const role = fresh?.role ?? user.role ?? "member";
   // Passkeys are optional; they do not replace the administrator TOTP mandate.
   const secured = !!fresh?.twoFactorEnabled;
+  const mustSecure = (isElevated && !secured) || mustEnroll2fa;
+  if (fresh && user.onboardedAt && !mustSecure) return DONE;
   const steps: OnboardingStep[] = [];
 
   // Genesis initializes a pending domain. Activate it during onboarding so

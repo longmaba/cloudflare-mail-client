@@ -9,6 +9,28 @@ mailbox authorization, MIME limits and storage changes require regression tests.
 Run real mail tests only against your own test domain and accounts. Never commit
 `.local/`, API tokens, encryption keys, mailbox data or recovery links.
 
+For the local browser regression, use a development checkout and apply local
+migrations before creating synthetic fixtures:
+
+```sh
+pnpm run db:migrate:local
+pnpm --filter doota run seed:dummy
+pnpm run dev
+```
+
+With the dev server running, execute this in a second terminal:
+
+```sh
+node apps/web/e2e/local-client.mjs
+```
+
+The harness requires installed Chrome/Chromium (set `LOCAL_CLIENT_CHROME` if
+needed), uses only a synthetic `.invalid` account and blocks send requests.
+It exercises folders, search, conversation actions and draft attachments,
+saves screenshots in `docs/screenshots/` and writes its report under `.local/`.
+The seed command replaces its synthetic organization in local D1; never use a
+development fixture checkout for production mail.
+
 Submit a PR describing the concrete problem, resulting behavior, tests and known
 limits. Commit messages explain why the change was needed; git trailers such as
 `Constraint`, `Rejected`, `Tested` and `Not-tested` capture relevant decisions.

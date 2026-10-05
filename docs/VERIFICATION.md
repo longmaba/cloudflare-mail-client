@@ -10,7 +10,7 @@ On Windows with Node 24.12.0 and pnpm 10.26.2:
 | --- | --- |
 | Frozen workspace and infrastructure installs | Passed |
 | Workspace type and Svelte checks | Passed, zero errors and warnings |
-| Application tests | 78 files, 710 tests passed |
+| Application tests | 79 files, 738 tests passed |
 | Portable installer tests | 26 tests passed |
 | Infrastructure TypeScript check | Passed |
 | Production Cloudflare build | Passed |
@@ -33,6 +33,21 @@ The protected first-admin wizard was exercised locally: domain login, required
 external recovery address, password creation and first mailbox provisioning.
 Reopening setup after creation redirects to login. The correct configured
 origin logs in; recovery and TOTP requirements appear during onboarding.
+
+The full local Chrome run passed 14 functional checks: five folder views,
+free-text search, decrypted conversation/read state, preserved inbox rows,
+archive/restore, trash/restore, responsive captures and saved draft attachments.
+It also exposed an uncaught autosave cancellation. After fixing the debouncer,
+the focused production-build compose run passed all four checks with zero
+unexpected HTTP failures, page errors or runtime exceptions. Upload returned
+HTTP 201; the reopened attachment returned HTTP 200 with identical bytes.
+No send action was attempted. Desktop captures use 1280 by 800 pixels and the
+mobile inbox uses 390 by 844 pixels; physical devices were not tested.
+
+Run the reusable harness with the fixture instructions in
+[CONTRIBUTING.md](../CONTRIBUTING.md). Administrator TOTP enrollment, external
+recovery delivery and incoming raw attachment rendering remain outside this
+browser evidence; their automated coverage does not replace live acceptance.
 
 [Screenshots](screenshots.md) use only local synthetic accounts and mail.
 Synthetic fixture accounts have pre-completed onboarding; they do not prove

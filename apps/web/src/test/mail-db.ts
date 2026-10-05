@@ -15,7 +15,7 @@ const MIG_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", 
  * idempotency depends on, not a mock. Returns a drizzle db compatible with the
  * D1-typed functions under test.
  */
-export async function makeDb() {
+export async function makeDb(options: { maxBindings?: number } = {}) {
   const client = createClient({ url: ":memory:" });
   for (const file of readdirSync(MIG_DIR).filter((fileName) => fileName.endsWith(".sql")).sort()) {
     const sql = readFileSync(join(MIG_DIR, file), "utf8");
@@ -25,5 +25,9 @@ export async function makeDb() {
     }
   }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return drizzle(client, { schema }) as any;
+  return drizzle(client, { schema, ...(options.maxBindings ? {
+    logger: { logQuery(_query: string, params: unknown[]) {
+      if (params.length > options.maxBindings!) throw new Error(`D1 bound parameter limit exceeded: ${params.length}`);
+    } },
+  } : {}) }) as any;
 }

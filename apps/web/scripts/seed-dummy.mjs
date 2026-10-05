@@ -1,15 +1,15 @@
 #!/usr/bin/env node
-// Seed dummy test data into the local (or --remote) D1: one active org, a shared
+// Seed dummy test data into the local D1: one active org, a shared
 // support@ mailbox, 100 member users (each with a personal mailbox), and ~100
 // threads of encrypted email addressed to support@, so the mail client, search,
 // admin member list, and oversight all have realistic data to render.
 //
 //   node scripts/seed-dummy.mjs            # local D1 (npm run dev)
-//   node scripts/seed-dummy.mjs --remote   # deployed D1  (careful!)
+//   --remote is refused; synthetic data never enters a deployed mailbox.
 //
 // Content is encrypted with the same envelope as src/lib/server/mail/crypto.ts
-// and indexed with the same blind tokens as search.ts, using MAIL_DEK /
-// MAIL_SEARCH_KEY. If those aren't set in .dev.vars/.env, fresh keys are generated
+// and indexed in the current mailbox-scoped plaintext FTS5 table. If MAIL_DEK /
+// MAIL_SEARCH_KEY aren't set in .dev.vars/.env, fresh keys are generated
 // and written to .dev.vars so the dev worker decrypts what we seed.
 
 import { readFileSync, writeFileSync, existsSync, appendFileSync } from "node:fs";
@@ -173,6 +173,7 @@ async function build() {
 
   // Fresh start: dropping the org cascades all its mail + memberships; then drop
   // the dummy user rows (independent of org).
+  P(`DELETE FROM message_search WHERE message_id IN (SELECT m.id FROM message m JOIN organization o ON o.id=m.org_id WHERE o.domain=${esc(ORG_DOMAIN)});`);
   P(`DELETE FROM organization WHERE domain=${esc(ORG_DOMAIN)};`);
   P(`DELETE FROM "user" WHERE email LIKE ${esc("%@" + ORG_DOMAIN)};`);
 
@@ -235,9 +236,8 @@ async function build() {
       // Delivery into support@: inbound 'to', outbound 'from'.
       P(`INSERT INTO delivery (id,org_id,message_id,mailbox_id,role,is_read,keywords,created_at) VALUES (${esc(uuid())},${esc(orgId)},${esc(messageId)},${esc(supportMailboxId)},${outbound ? "'from'" : "'to'"},0,'[]',${at});`);
 
-      // Blind-token FTS row.
-      const toks = await tokensFor(sk, [subject, body]);
-      if (toks.length) P(`INSERT INTO message_fts (message_id,org_id,tokens) VALUES (${esc(messageId)},${esc(orgId)},${esc(toks.join(" "))});`);
+      // Same readable FTS5 index used by the current client search.
+      P(`INSERT INTO message_search (message_id,subject,body) VALUES (${esc(messageId)},${esc(subject)},${esc(body)});`);
 
       refs.push(mid);
       lastMid = mid;

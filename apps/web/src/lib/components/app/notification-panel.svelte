@@ -191,7 +191,7 @@
 						<TriangleAlertIcon class="text-destructive mt-0.5 size-4 shrink-0" />
 						<span class="min-w-0 flex-1">
 							<span class="block truncate text-sm {uread ? 'font-semibold' : 'font-medium'}">Inbound routing detached</span>
-							<span class="text-muted-foreground block truncate text-xs">{notification.orgDomain ? `Mail to ${notification.orgDomain} isn't reaching Doota — click to fix` : 'A domain catch-all is not attached — click to fix'}</span>
+							<span class="text-muted-foreground block truncate text-xs">{notification.orgDomain ? `Mail to ${notification.orgDomain} isn't reaching the mail client — click to fix` : 'A domain catch-all is not attached — click to fix'}</span>
 						</span>
 					{:else}
 						<AlertCircleIcon class="text-destructive mt-0.5 size-4 shrink-0" />

@@ -12,6 +12,28 @@ let db: any, ck: any;
 beforeEach(async () => { db = await makeDb(); ck = await importKey(btoa("0123456789abcdef0123456789abcdef")); });
 
 describe("local-first endpoints", () => {
+  it.each(["mailbox", "thread"])("%s deltas request a reseed when a quiet catch-up exceeds the 500-event page", async (surface) => {
+    const { mailboxId, threadIds } = await seedMailboxWithThreads(db, ck, 2);
+    const seed = await buildSeed(db, { mailboxId, ck, userId: "u1", includeCollab: true, assignedTo: null });
+    const { changeLog } = await import("@doota/db/mail.schema");
+    await db.insert(changeLog).values(Array.from({ length: 500 }, () => ({
+      mailboxId, type: "Thread", objectId: threadIds[0], action: "updated", createdAt: new Date(),
+    })));
+    // The unread change to the second thread falls beyond the first page. A
+    // client may receive no later push, so retaining a partial diff is unsafe.
+    await db.run(`UPDATE delivery SET is_read=1 WHERE mailbox_id='${mailboxId}' AND message_id IN (SELECT id FROM message WHERE thread_id='${threadIds[1]}')`);
+    const ctx = {
+      mailboxId, threadId: threadIds[1], sinceSeq: seed.cursor,
+      ck, userId: "u1", includeCollab: true, assignedTo: null, env: {},
+    };
+
+    const delta = surface === "mailbox"
+      ? await buildChanges(db, ctx)
+      : await buildThreadMessageChanges(db, ctx);
+
+    expect(delta).toEqual({ upserts: [], removals: [], newSeq: seed.cursor, cannotCalculate: true });
+  });
+
   it("buildSeed returns every placement's rows + a cursor at the current seq", async () => {
     const { mailboxId } = await seedMailboxWithThreads(db, ck, 2);
     const seed = await buildSeed(db, { mailboxId, ck, userId: "u1", includeCollab: true, assignedTo: null });

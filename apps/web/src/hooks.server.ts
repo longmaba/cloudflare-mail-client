@@ -7,7 +7,6 @@ import { drizzle } from "drizzle-orm/d1";
 import * as schema from "@doota/db/schema";
 import {
   getOnboardingStatus,
-  hasSecurityDebt,
   markOnboarded,
   notifyOnboardingComplete,
   onboardingHome,
@@ -43,15 +42,14 @@ function expireLegacySessionCookies(request: Request, response: Response): void 
 const handleBetterAuth: Handle = async ({ event, resolve }) => {
   if (building) return resolve(event);
 
-  // The better-auth admin plugin's HTTP routes (/api/auth/admin/*: set-role,
-  // impersonate-user, ban, remove, etc.) are NOT used by the app — every
+  // Better Auth's admin and organization HTTP routes are not used by the app — every
   // privileged action goes through org-scoped, server-side auth.api.* in the RPC
   // layer. Left reachable over HTTP, a logged-in instance admin could self-promote
   // to superadmin or impersonate members across orgs (the plugin gates only on the
   // instance role, bypassing our org scoping). Block the raw routes at the edge;
   // server-side auth.api.* calls don't pass through this handler, so provisioning
   // and the app's own admin actions keep working.
-  if (event.url.pathname.startsWith("/api/auth/admin/")) {
+  if (event.url.pathname.startsWith("/api/auth/admin/") || event.url.pathname.startsWith("/api/auth/organization/")) {
     return new Response("Not found", { status: 404 });
   }
 
@@ -101,20 +99,14 @@ const handleBetterAuth: Handle = async ({ event, resolve }) => {
     const inOnboarding = p.startsWith("/onboarding");
 
     if (!bypass) {
-      // Org-wide 2FA mandate (Phase C): a member of a require_2fa org past the
-      // grace deadline must enroll TOTP too. Only checked when 2FA is off — free
-      // for everyone already enrolled. `grace` sets a soft flag for a UI nudge;
-      // `block` reopens onboarding just like an elevated security debt.
-      const orgGate = user.twoFactorEnabled
-        ? ({ kind: "none" } as const)
-        : await orgTwoFactorGate(db, user, session.session.activeOrganizationId);
+      // Read current administrator memberships and TOTP flags on every request:
+      // promotion and disabling TOTP must take effect despite cached cookies.
+      // Ordinary members retain the organization's optional grace period.
+      const orgGate = await orgTwoFactorGate(db, user, session.session.activeOrganizationId);
       if (orgGate.kind === "grace") event.locals.enroll2faBy = orgGate.deadline;
       const mustEnroll2fa = orgGate.kind === "block";
 
-      // Security mandate: an admin/superadmin whose session says 2FA is off can
-      // be signed in with bare credentials — even if already onboarded, they go
-      // back through the secure-account step before anything else is reachable.
-      if (user.onboardedAt && !hasSecurityDebt(user) && !mustEnroll2fa) {
+      if (user.onboardedAt && !mustEnroll2fa) {
         // Fast path: finished. Don't let them wander back into the flow.
         if (inOnboarding) redirect(302, onboardingHome(user.role));
       } else {

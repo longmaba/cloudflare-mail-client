@@ -89,6 +89,7 @@ async function deploy(instance, token) {
 
 async function setup() {
   process.stdout.write(paidRequirement);
+  process.stdout.write('Credentials: create separate custom deployment and runtime tokens at https://dash.cloudflare.com/profile/api-tokens, restricted to your account and zone. Follow docs/TOKENS.md for the exact permission matrix and Email Service activation. Never use a Global API Key.\n');
   await installDependencies();
   const existing = await readInstance(projectRoot);
   const auth = await credentials(existing);

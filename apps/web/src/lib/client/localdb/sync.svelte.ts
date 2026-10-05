@@ -26,7 +26,7 @@
 
 import { FiniteStateMachine } from "runed";
 import type { ThreadSummary } from "@doota/mail-core/read";
-import type { TimelineItem } from "./schema";
+import type { MailboxSeedState, TimelineItem } from "./schema";
 
 // ---------------------------------------------------------------------------
 // Injected-dependency types (mirrors the real localdb facade + remote fns)
@@ -34,6 +34,7 @@ import type { TimelineItem } from "./schema";
 
 export type SyncLocalDb = {
   getCursor(mailboxId: string): Promise<number | null>;
+  getSeedState(mailboxId: string): Promise<MailboxSeedState | null>;
   seed(mailboxId: string, rows: ThreadSummary[], cursor: number): Promise<void>;
   applyDeltas(
     mailboxId: string,
@@ -127,16 +128,19 @@ export function createSync(deps: {
   async function doResync(mailboxId: string): Promise<void> {
     fsm.send("RESYNC");
     try {
-      const cursor = await localdb.getCursor(mailboxId);
-      const result = await changesFn({ mailboxId, sinceSeq: cursor ?? 0 });
+      const [cursor, seedState] = await Promise.all([
+        localdb.getCursor(mailboxId),
+        localdb.getSeedState(mailboxId),
+      ]);
+      if (cursor === null || seedState === null) {
+        // A legacy/delta-only cursor is not a seeded mailbox. Realtime can
+        // arrive before ensure(), or after a failed seed, so recover here too.
+        await doSeed(mailboxId);
+        return;
+      }
+      const result = await changesFn({ mailboxId, sinceSeq: cursor });
       if (result.cannotCalculate) {
-        // changesFn says it can't diff — fall back to a full reseed
-        const { rows, newCursor } = await (async () => {
-          const freshSeed = await seedFn(mailboxId);
-          return { rows: freshSeed.rows, newCursor: freshSeed.cursor };
-        })();
-        await localdb.seed(mailboxId, rows, newCursor);
-        fsm.send("DONE");
+        await doSeed(mailboxId);
       } else {
         await localdb.applyDeltas(mailboxId, result.upserts, result.removals, result.newSeq);
         fsm.send("DONE");
@@ -198,20 +202,16 @@ export function createSync(deps: {
   return {
     /**
      * Ensure the local mirror is initialised for mailboxId.
-     * - No cursor → seed from scratch.
-     * - Cursor present → catch-up resync.
+     * - No cursor or no full-seed record → seed from scratch.
+     * - Seed and cursor present → catch-up resync.
      */
     async ensure(mailboxId: string): Promise<void> {
       if (isBusy()) {
         pendingResyncMailboxId = mailboxId;
         return;
       }
-      const cursor = await localdb.getCursor(mailboxId);
-      if (cursor === null) {
-        await doSeed(mailboxId);
-      } else {
-        await doResync(mailboxId);
-      }
+      // Mark busy before the first async read, so realtime cannot race a seed.
+      await doResync(mailboxId);
       await drainPendingResync();
     },
 

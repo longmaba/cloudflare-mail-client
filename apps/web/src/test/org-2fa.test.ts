@@ -57,8 +57,14 @@ describe("orgTwoFactorGate", () => {
 
   it("is a no-op once the member has enrolled TOTP (exempts the enrolled)", async () => {
     await seed(true, NOW - 1000);
+    await db.update(schema.user).set({ twoFactorEnabled: true }).where(eq(schema.user.id, "u1"));
     const enrolled = { ...memberUser, twoFactorEnabled: true };
     expect((await orgTwoFactorGate(db, enrolled)).kind).toBe("none");
+  });
+
+  it("ignores a stale enrolled cookie when current TOTP is disabled", async () => {
+    await seed(true, NOW - 1000);
+    expect((await orgTwoFactorGate(db, { ...memberUser, twoFactorEnabled: true })).kind).toBe("block");
   });
 
   it("resolves the org from the session's active org when given", async () => {

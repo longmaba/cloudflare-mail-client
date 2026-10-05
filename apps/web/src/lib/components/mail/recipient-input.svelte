@@ -1,6 +1,6 @@
 <script lang="ts">
 	// SPDX-License-Identifier: Apache-2.0
-	import { onMount } from 'svelte';
+	import { onMount, onDestroy } from 'svelte';
 	import { recipientCandidates, recipientSuggestions } from '$lib/rpc/draft.remote';
 	import SenderAvatar from './sender-avatar.svelte';
 	import XIcon from '@lucide/svelte/icons/x';
@@ -34,6 +34,10 @@
 			// Non-fatal — the server fallback in onInput still answers.
 		}
 	});
+	onDestroy(() => {
+		clearTimeout(timer);
+		seq++;
+	});
 	function localMatches(q: string): RecipientSuggestion[] {
 		return candidates
 			.filter(
@@ -45,6 +49,8 @@
 	}
 
 	function commit(addr: string) {
+		clearTimeout(timer);
+		seq++;
 		const recipient = addr.trim().toLowerCase();
 		if (recipient && recipient.includes('@') && !value.includes(recipient)) {
 			value = [...value, recipient];
@@ -78,11 +84,20 @@
 		// the cached top-N). Debounced + seq-guarded so it can't clobber newer input.
 		if (local.length === 0) {
 			timer = setTimeout(async () => {
-				const res = (await recipientSuggestions(q)).filter((suggestion) => !value.includes(suggestion.address));
-				if (mySeq !== seq) return;
-				suggestions = res;
-				open = res.length > 0;
-				active = -1;
+				try {
+					const res = (await recipientSuggestions(q)).filter((suggestion) => !value.includes(suggestion.address));
+					if (mySeq !== seq) return;
+					suggestions = res;
+					open = res.length > 0;
+					active = -1;
+				} catch {
+					// Autocomplete is optional; cancellation or an unavailable lookup
+					// must leave manual recipient entry usable without an uncaught error.
+					if (mySeq !== seq) return;
+					suggestions = [];
+					open = false;
+					active = -1;
+				}
 			}, 200);
 		}
 	}

@@ -62,7 +62,7 @@
 			<UserIcon class="size-4" /> Profile
 		</Card.CardTitle>
 		<Card.CardDescription>
-			Your photo and display name are shown across Doota and as the sender on outgoing mail. Login
+			Your photo and display name are shown across the mail client and as the sender on outgoing mail. Login
 			address and security settings live in the Security tab.
 		</Card.CardDescription>
 	</Card.CardHeader>

@@ -2,6 +2,9 @@
 import type { ThreadSummary } from "@doota/mail-core/read";
 import type { MessageDTO } from "@doota/mail-core/mail-thread-contract";
 
+/** Written only by a full seed, independently of incremental sync cursors. */
+export type MailboxSeedState = { complete: boolean };
+
 /** A mirrored thread-list row: ThreadSummary + owning mailbox. JSON arrays are
  *  stored as TEXT so the row is a flat bind object. */
 export type ThreadRow = {
@@ -62,6 +65,7 @@ CREATE TABLE IF NOT EXISTS thread_list (
 );
 CREATE INDEX IF NOT EXISTS thread_list_view ON thread_list (mailbox_id, placement, last_message_at);
 CREATE TABLE IF NOT EXISTS sync_state (mailbox_id TEXT PRIMARY KEY, cursor INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS mailbox_seed_state (mailbox_id TEXT PRIMARY KEY, complete INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS message (
   thread_id TEXT NOT NULL,
   message_id TEXT NOT NULL,
@@ -128,6 +132,11 @@ export const getCursorSql = () => ({ sql: `SELECT cursor FROM sync_state WHERE m
 export const setCursorSql = () => ({
   sql: `INSERT INTO sync_state (mailbox_id, cursor) VALUES ($mailbox_id,$cursor)
         ON CONFLICT(mailbox_id) DO UPDATE SET cursor=excluded.cursor`,
+});
+export const getSeedStateSql = () => ({ sql: `SELECT complete FROM mailbox_seed_state WHERE mailbox_id=$mailbox_id` });
+export const setSeedStateSql = () => ({
+  sql: `INSERT INTO mailbox_seed_state (mailbox_id, complete) VALUES ($mailbox_id,$complete)
+        ON CONFLICT(mailbox_id) DO UPDATE SET complete=excluded.complete`,
 });
 export const clearMailboxSql = () => ({ sql: `DELETE FROM thread_list WHERE mailbox_id=$mailbox_id` });
 

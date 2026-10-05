@@ -13,6 +13,7 @@ import { useDebounce } from 'runed';
 import { toast } from 'svelte-sonner';
 import { goto } from '$app/navigation';
 import { sendToast } from '$lib/utils/send-toast';
+import { errorMessage } from '$lib/utils/error-message';
 import { compose, type ComposePrefill } from '$lib/client/compose.svelte.js';
 import {
 	sendIdentities,
@@ -267,7 +268,10 @@ export class ComposeSession {
 	}
 
 	// ---- autosave --------------------------------------------------------------
-	private debouncedSave = useDebounce(() => this.flushSave(), 800);
+	private debouncedSave = useDebounce(() => {
+		if (this.phase !== 'editing' || !this.mailboxId) return this.saveChain;
+		return this.enqueueSave();
+	}, 800);
 
 	scheduleSave = (): void => {
 		if (this.phase !== 'editing') return;
@@ -279,7 +283,9 @@ export class ComposeSession {
 			cc: this.cc,
 			bcc: this.bcc
 		});
-		this.debouncedSave();
+		void this.debouncedSave().catch((err) => {
+			if (err !== 'Cancelled') toast.error(errorMessage(err, 'Draft could not be saved. Please try again.'));
+		});
 	};
 
 	// Single-flight: debounce flush, blur flush, visibilitychange flush, Send and
@@ -325,7 +331,7 @@ export class ComposeSession {
 		return this.saveChain;
 	}
 	flushSave = (): Promise<void> => {
-		this.debouncedSave.cancel();
+		if (this.debouncedSave.pending) void this.debouncedSave.cancel();
 		// Don't autosave once we're sending/sent; send() drives its own final save.
 		if (this.phase !== 'editing' || !this.mailboxId) return this.saveChain;
 		return this.enqueueSave();
@@ -376,17 +382,23 @@ export class ComposeSession {
 	// ---- attachments -----------------------------------------------------------
 	uploadFiles = async (files: File[]): Promise<void> => {
 		if (!files.length) return;
-		const id = await this.ensureDraft();
-		if (!id) return;
 		this.uploading = true;
 		try {
+			const id = await this.ensureDraft();
+			if (!id) throw new Error('Choose a sending mailbox before attaching a file.');
 			for (const file of files) {
 				const fd = new FormData();
 				fd.append('draftId', id);
 				fd.append('file', file);
 				const res = await fetch('/api/drafts/attachments', { method: 'POST', body: fd });
-				if (res.ok) this.attachments = ((await res.json()) as { attachments: AttachmentRef[] }).attachments;
+				if (!res.ok) {
+					const detail = await res.json().catch(() => null);
+					throw new Error(errorMessage(detail, `Attachment upload failed (${res.status}).`));
+				}
+				this.attachments = ((await res.json()) as { attachments: AttachmentRef[] }).attachments;
 			}
+		} catch (err) {
+			toast.error(errorMessage(err, 'Attachment upload failed. Please try again.'));
 		} finally {
 			this.uploading = false;
 		}
@@ -480,7 +492,7 @@ export class ComposeSession {
 	 *  is instant: the save/discard runs in the background so the surface doesn't
 	 *  hang on a network round-trip. */
 	close = (): void => {
-		this.debouncedSave.cancel();
+		if (this.debouncedSave.pending) void this.debouncedSave.cancel();
 		if (this.draftId && !this.hasContent) {
 			// Emptied-out draft is no longer a draft: delete the husk.
 			clearMirror(this.mirrorKey);
@@ -494,7 +506,7 @@ export class ComposeSession {
 	};
 
 	discard = async (): Promise<void> => {
-		this.debouncedSave.cancel();
+		if (this.debouncedSave.pending) void this.debouncedSave.cancel();
 		if (this.draftId) await discardDraftById({ draftId: this.draftId });
 		this.reset();
 		this.options.requestClose();

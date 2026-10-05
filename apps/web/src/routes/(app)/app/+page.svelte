@@ -81,7 +81,6 @@
 	import { RENDER_CACHE_VERSION } from '@doota/mail-core/mime';
 	import { localdb } from '$lib/client/localdb';
 	import { createSync } from '$lib/client/localdb/sync.svelte';
-	import { SEED_THREAD_LIMIT } from '$lib/shared/thread-mirror-limits';
 	import { myFolders, threadFolders, moveToFolder, undoMove, createFolder, addThreadLabel, removeThreadLabel } from '$lib/rpc/label.remote';
 	import TagIcon from '@lucide/svelte/icons/tag';
 	import { unread } from '$lib/client/unread.svelte.js';
@@ -180,8 +179,18 @@
 	let localReady = $state(false);
 	const sync = createSync({
 		localdb,
-		seedFn: async (mailboxId) => await seedThreadList({ mailboxId }),
-		changesFn: async ({ mailboxId, sinceSeq }) => await threadChanges({ mailboxId, sinceSeq }),
+		seedFn: async (mailboxId) => {
+			const query = seedThreadList({ mailboxId });
+			await query.refresh();
+			if (!query.current) throw new Error('Mailbox seed is unavailable');
+			return query.current;
+		},
+		changesFn: async ({ mailboxId, sinceSeq }) => {
+			const query = threadChanges({ mailboxId, sinceSeq });
+			await query.refresh();
+			if (!query.current) throw new Error('Mailbox changes are unavailable');
+			return query.current;
+		},
 		seedThreadFn: async (threadId) => {
 			const mb = mailboxId;
 			if (!mb) throw new Error('No active mailbox');
@@ -473,17 +482,10 @@
 	const pinOverride = new SvelteMap<string, number | null>();
 	const withPin = (thread: ThreadSummary): ThreadSummary =>
 		pinOverride.has(thread.threadId) ? { ...thread, pinnedAt: pinOverride.get(thread.threadId)! } : thread;
-	// Local drives the list only when the mirror is ready, has rows, AND fits under
-	// the seed cap. At/over the cap the seed is truncated — silently hiding threads
-	// beyond position SEED_THREAD_LIMIT — so fall back to remote pagination which
-	// already shows everything. Under the cap the whole mailbox is seeded and local
-	// can drive without dropping threads.
-	// ponytail: (liveRows.current ?? []) guards the noop-bridge undefined case.
-	const localDriving = $derived(
-		localReady &&
-		(liveRows.current ?? []).length > 0 &&
-		(liveRows.current ?? []).length < SEED_THREAD_LIMIT
-	);
+	// A cursor or a few optimistic/delta rows do not prove a complete mailbox.
+	// Capped all-folder seeds and label views retain remote pagination; the
+	// mirror stores placements only and cannot apply the label filter.
+	const localDriving = $derived(localReady && liveRows.complete && !labelId);
 	const listSource = $derived(localDriving ? (liveRows.current ?? []) : items);
 	// One list, one paint. Every row already carries pinnedAt (mirror AND the remote
 	// page), so a single stable sort lifts pins to the top by pin time and leaves the

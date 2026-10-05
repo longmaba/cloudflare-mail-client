@@ -20,6 +20,9 @@ import { trustedSenders } from "./sender-trust";
 import { log } from "./log";
 
 type Db = DrizzleD1Database<typeof schema>;
+// D1 permits 100 bound parameters; leave room for mailbox/user filters.
+// https://developers.cloudflare.com/d1/platform/limits/
+const THREAD_QUERY_BATCH = 90;
 
 /**
  * Read model. A thread DTO is assembled from thread + messages + this mailbox's
@@ -222,6 +225,15 @@ async function projectThreadRows(
   },
 ): Promise<ThreadSummary[]> {
   const { mailboxId, ck, states } = opts;
+  if (states.length > THREAD_QUERY_BATCH) {
+    const summaries: ThreadSummary[] = [];
+    for (let offset = 0; offset < states.length; offset += THREAD_QUERY_BATCH) {
+      summaries.push(...await projectThreadRows(db, {
+        ...opts, states: states.slice(offset, offset + THREAD_QUERY_BATCH),
+      }));
+    }
+    return summaries;
+  }
 
   // Unread keys on the mailbox mode (same model as unreadCount below):
   // personal → last_inbound_at (an own send never marks unread); shared →
@@ -367,6 +379,16 @@ export async function threadSummariesByIds(
   },
 ): Promise<ThreadSummary[]> {
   if (opts.threadIds.length === 0) return [];
+  if (opts.threadIds.length > THREAD_QUERY_BATCH) {
+    const summaries: ThreadSummary[] = [];
+    const uniqueIds = [...new Set(opts.threadIds)];
+    for (let offset = 0; offset < uniqueIds.length; offset += THREAD_QUERY_BATCH) {
+      summaries.push(...await threadSummariesByIds(db, {
+        ...opts, threadIds: uniqueIds.slice(offset, offset + THREAD_QUERY_BATCH),
+      }));
+    }
+    return summaries;
+  }
   const states = await db
     .select({
       threadId: schema.threadState.threadId,

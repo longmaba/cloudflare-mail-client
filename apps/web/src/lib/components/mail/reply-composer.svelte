@@ -11,6 +11,7 @@
 	import { Spinner } from '$lib/components/ui/spinner/index.js';
 	import { toast } from 'svelte-sonner';
 	import { sendToast } from '$lib/utils/send-toast';
+	import { errorMessage } from '$lib/utils/error-message';
 	import PaperclipIcon from '@lucide/svelte/icons/paperclip';
 	import XIcon from '@lucide/svelte/icons/x';
 	import ChevronDownIcon from '@lucide/svelte/icons/chevron-down';
@@ -262,7 +263,12 @@
 	// Switching threads remounts this component via {#key thread.id} in the page,
 	// so initial state above is always fresh for the current parent.
 
-	const scheduleSave = useDebounce(() => flushSave(), 800);
+	const debouncedSave = useDebounce(() => enqueueSave(), 800);
+	function scheduleSave() {
+		void debouncedSave().catch((err) => {
+			if (err !== 'Cancelled') toast.error(errorMessage(err, 'Reply could not be saved. Please try again.'));
+		});
+	}
 
 	// Single-flight: the debounce flush, the visibilitychange flush, Send and
 	// attachment upload can all race here. Two concurrent startDraft calls mint
@@ -300,17 +306,23 @@
 		const files = [...(input.files ?? [])];
 		input.value = '';
 		if (!files.length) return;
-		const id = await ensureDraft();
-		if (!id) return;
 		uploading = true;
 		try {
+			const id = await ensureDraft();
+			if (!id) throw new Error('Choose a sending mailbox before attaching a file.');
 			for (const file of files) {
 				const fd = new FormData();
 				fd.append('draftId', id);
 				fd.append('file', file);
 				const res = await fetch('/api/drafts/attachments', { method: 'POST', body: fd });
-				if (res.ok) attachments = ((await res.json()) as { attachments: AttachmentRef[] }).attachments;
+				if (!res.ok) {
+					const detail = await res.json().catch(() => null);
+					throw new Error(errorMessage(detail, `Attachment upload failed (${res.status}).`));
+				}
+				attachments = ((await res.json()) as { attachments: AttachmentRef[] }).attachments;
 			}
+		} catch (err) {
+			toast.error(errorMessage(err, 'Attachment upload failed. Please try again.'));
 		} finally {
 			uploading = false;
 		}
@@ -326,7 +338,10 @@
 	// reloading the body mid-type. Chaining makes each save see the bumped revision.
 	let saveChain: Promise<void> = Promise.resolve();
 	function flushSave(): Promise<void> {
-		scheduleSave.cancel();
+		if (debouncedSave.pending) void debouncedSave.cancel();
+		return enqueueSave();
+	}
+	function enqueueSave(): Promise<void> {
 		saveChain = saveChain.then(doSave, doSave);
 		return saveChain;
 	}
