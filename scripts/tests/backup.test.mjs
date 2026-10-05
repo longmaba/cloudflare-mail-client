@@ -36,6 +36,7 @@ test('captures a protected full-D1 restore point using only read-only Time Trave
   db.exec("CREATE VIRTUAL TABLE message_search USING fts5(subject); INSERT INTO message_search(subject) VALUES ('stored mail');");
   let called = 0;
   const result = await captureD1RestorePoint(root, config, secrets, secrets.deployToken, release, {
+    inheritedEnv: {},
     now: () => new Date('2026-10-06T01:02:03.000Z'),
     execute: async (args, options) => {
       called++;
@@ -80,7 +81,7 @@ test('captures a protected full-D1 restore point using only read-only Time Trave
 test('repeated or interrupted upgrades retain distinct recovery records without altering resources or keys', async (t) => {
   const { root, config, secrets } = await fixture(t);
   const before = await readFile(join(root, '.local', 'secrets.json'));
-  const options = { execute: async () => JSON.stringify({ bookmark }), now: () => new Date('2026-10-06T01:02:03.000Z') };
+  const options = { inheritedEnv: {}, execute: async () => JSON.stringify({ bookmark }), now: () => new Date('2026-10-06T01:02:03.000Z') };
   const first = await captureD1RestorePoint(root, config, secrets, secrets.deployToken, release, options);
   const resumed = await captureD1RestorePoint(root, config, secrets, secrets.deployToken, release, options);
   assert.notEqual(first.path, resumed.path);
@@ -94,6 +95,7 @@ for (const [index, response] of ['not JSON synthetic-private-output', '', 'null'
   test(`malformed Time Travel response #${index + 1} blocks recovery capture without exposing provider output`, async (t) => {
     const { root, config, secrets } = await fixture(t);
     await assert.rejects(captureD1RestorePoint(root, config, secrets, secrets.deployToken, release, {
+      inheritedEnv: {},
       execute: async () => response,
     }), error => {
       assert.match(error.message, /Upgrade blocked before checkout/);
@@ -109,6 +111,7 @@ test('permission and provider failures are sanitized and cannot produce a recove
   const { root, config, secrets } = await fixture(t);
   for (const status of [403, 429, 502]) {
     await assert.rejects(captureD1RestorePoint(root, config, secrets, secrets.deployToken, release, {
+      inheritedEnv: {},
       execute: async () => { throw new Error(`${status}: ${secrets.deployToken} synthetic-private-mail`); },
     }), error => {
       assert.match(error.message, /D1 permissions and Cloudflare availability/);
@@ -125,6 +128,7 @@ test('failure to durably save a validated bookmark rejects before a caller can c
   let returned = false;
   await assert.rejects((async () => {
     await captureD1RestorePoint(root, config, secrets, secrets.deployToken, release, {
+      inheritedEnv: {},
       execute: async () => JSON.stringify({ bookmark }),
       writeJson: async (path, value) => {
         if (value.kind === 'd1-time-travel') throw new Error('Synthetic disk full');
@@ -140,8 +144,24 @@ test('failure to durably save a validated bookmark rejects before a caller can c
 test('invalid database identity and key drift block capture before contacting D1', async (t) => {
   const { root, config, secrets } = await fixture(t);
   let calls = 0;
-  const options = { execute: async () => { calls++; return JSON.stringify({ bookmark }); } };
+  const options = { inheritedEnv: {}, execute: async () => { calls++; return JSON.stringify({ bookmark }); } };
   await assert.rejects(captureD1RestorePoint(root, config, secrets, secrets.deployToken, { ...release, databaseId: '--other-db' }, options), /database ID is invalid/);
   await assert.rejects(captureD1RestorePoint(root, config, { ...secrets, MAIL_DEK: 'changed' }, secrets.deployToken, release, options), /keys changed/);
   assert.equal(calls, 0);
+});
+
+test('the default environment still rejects inherited key drift before contacting D1', async (t) => {
+  const { root, config, secrets } = await fixture(t);
+  const previous = process.env.BETTER_AUTH_SECRET;
+  let calls = 0;
+  process.env.BETTER_AUTH_SECRET = 'synthetic-conflicting-build-key';
+  try {
+    await assert.rejects(captureD1RestorePoint(root, config, secrets, secrets.deployToken, release, {
+      execute: async () => { calls++; return JSON.stringify({ bookmark }); },
+    }), /BETTER_AUTH_SECRET changed/);
+    assert.equal(calls, 0);
+  } finally {
+    if (previous === undefined) delete process.env.BETTER_AUTH_SECRET;
+    else process.env.BETTER_AUTH_SECRET = previous;
+  }
 });

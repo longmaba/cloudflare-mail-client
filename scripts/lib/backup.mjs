@@ -8,13 +8,13 @@ import { wrangler } from './process.mjs';
 /** D1 SQL export cannot handle this application's FTS virtual tables. Time
  * Travel recovers the complete production database without changing its schema. */
 export async function captureD1RestorePoint(root, config, secrets, token, release, {
-  execute = wrangler, writeJson = atomicJson, now = () => new Date(),
+  execute = wrangler, writeJson = atomicJson, now = () => new Date(), inheritedEnv = process.env,
 } = {}) {
   const { databaseId, tag, from, to } = release;
   if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(databaseId ?? '')) throw new Error('Live D1 database ID is invalid; upgrade blocked before checkout.');
   if (![tag, from, to].every(value => typeof value === 'string' && value.trim())) throw new Error('Upgrade release identity is incomplete; no restore point was captured.');
   const env = {
-    ...deploymentEnv(config, secrets, token),
+    ...deploymentEnv(config, secrets, token, inheritedEnv),
     // JSON is printed through Wrangler's log level; error suppresses it entirely.
     WRANGLER_LOG: 'log', WRANGLER_WRITE_LOGS: 'false', WRANGLER_SEND_METRICS: 'false',
   };

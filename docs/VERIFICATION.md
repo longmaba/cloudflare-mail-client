@@ -11,7 +11,7 @@ On Windows with Node 24.12.0 and pnpm 10.26.2:
 | Frozen workspace and infrastructure installs | Passed |
 | Workspace type and Svelte checks | Passed, zero errors and warnings |
 | Application tests | 80 files, 843 tests passed |
-| Portable installer tests | 71 tests passed; migration, credential replacement, live API responses and pre-upgrade restore points |
+| Portable installer tests | 72 tests passed; migration, credential replacement, live API responses and pre-upgrade restore points |
 | Infrastructure TypeScript check | Passed |
 | Production Cloudflare build | Passed |
 | Local D1 migrations | All migrations through `0058` applied |
