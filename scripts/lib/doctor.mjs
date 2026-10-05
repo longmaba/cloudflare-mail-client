@@ -3,6 +3,23 @@ import { cloudflare, dnsSnapshot, externalMx, listAll, workerSettings, assertRem
 
 const targetsInboundWorker = (rule, worker) => rule.actions?.length === 1 && rule.actions[0].type === 'worker' && rule.actions[0].value?.length === 1 && rule.actions[0].value[0] === worker;
 
+function lookupGuidance(status, permission) {
+  if (status === 401 || status === 403) return `Check runtime token ${permission} permissions for the selected account/zone and rerun doctor. See docs/TOKENS.md.`;
+  if (status === 429) return 'Cloudflare rate limited this read-only request. Wait before rerunning doctor.';
+  if (status >= 500 && status <= 599) return 'Cloudflare is temporarily unavailable. Rerun doctor after the provider recovers.';
+  if (!status) return 'The Cloudflare API could not be reached. Check the network connection and rerun doctor.';
+  return 'Cloudflare rejected this configuration lookup. Review the selected account, zone and domain, then rerun doctor.';
+}
+
+function txtValue(content) {
+  if (typeof content !== 'string') return undefined;
+  const value = content.trim();
+  // Classify one simple quoted TXT string without rewriting provider bytes.
+  if (/^"[^"\\\r\n]*"$/.test(value)) return value.slice(1, -1);
+  if (/["\\\r\n]/.test(value)) return undefined;
+  return value;
+}
+
 async function inspectRecipientRouting(config, api) {
   const rules = await listAll(api, `/zones/${config.zoneId}/email/routing/rules`);
   const recipients = new Set();
@@ -36,7 +53,9 @@ async function inspectSendingDomain(config, api) {
   let domains;
   try { domains = await listAll(api, `/zones/${config.zoneId}/email/sending/subdomains`); } catch (error) {
     if (error.code === 'MISSING_RUNTIME_TOKEN') throw error;
-    throw new Error(`Could not inspect native Email Sending for ${config.mailDomain}${error.status ? ` (HTTP ${error.status})` : ''}. Check runtime token Email Sending Read/Edit permissions for the selected account and Workers Paid entitlement, then rerun doctor. No send or configuration change was attempted.`);
+    const status = Number.isInteger(error.status) ? error.status : undefined;
+    const entitlement = status === 401 || status === 403 ? ' Confirm Workers Paid entitlement for the selected account.' : '';
+    throw new Error(`Could not inspect native Email Sending for ${config.mailDomain}${status ? ` (HTTP ${status})` : ''}. ${lookupGuidance(status, 'Email Sending Read/Edit')}${entitlement} No send or configuration change was attempted.`);
   }
   const exact = domains.find((domain) => domain.name?.toLowerCase() === config.mailDomain);
   if (!exact) throw new Error(`Native Email Sending is not configured for exact domain ${config.mailDomain}. Onboard this domain in Email Service > Email Sending; an enabled apex, sibling or wildcard entry is not this instance's scoped sending identity.`);
@@ -55,7 +74,8 @@ export async function inspectInstance(config, secrets, token, { api, fetcher = f
     try { return await request(path); } catch (error) {
       const status = Number.isInteger(error.status) ? error.status : undefined;
       const permission = path.includes('/email/sending') ? 'account Email Sending Read/Edit' : path.includes('/email/routing/rules') ? 'zone Email Routing Rules Read/Edit' : path.includes('/email/routing') ? 'Zone Settings Read/Edit' : path.includes('/dns_records') ? 'DNS Read/Edit' : 'Zone Read';
-      throw Object.assign(new Error(`Runtime token cannot inspect this configuration${status ? ` (HTTP ${status})` : ''}. Check ${permission} permissions for the selected account/zone and rerun doctor. See docs/TOKENS.md.`), { status });
+      const problem = status === 401 || status === 403 ? 'Runtime token cannot inspect this configuration' : 'Cloudflare configuration lookup failed';
+      throw Object.assign(new Error(`${problem}${status ? ` (HTTP ${status})` : ''}. ${lookupGuidance(status, permission)}`), { status });
     }
   };
   const runtimeApi = (path) => runtimeRead(runtimeRequest, path);
@@ -130,7 +150,11 @@ export async function inspectInstance(config, secrets, token, { api, fetcher = f
   await check('Inbound and sending DNS', async () => {
     const records = await dnsSnapshot(api, config.zoneId);
     const mailMx = records.filter((record) => record.type === 'MX' && record.name === config.mailDomain);
-    const spf = records.filter((record) => record.type === 'TXT' && record.name === config.mailDomain && record.content.startsWith('v=spf1'));
+    const txt = records.filter((record) => record.type === 'TXT' && record.name === config.mailDomain);
+    if (txt.some((record) => txtValue(record.content) === undefined && /^"?v=spf1(?:\s|["\\]|$)/i.test(String(record.content).trim()))) {
+      throw new Error('SPF TXT uses an ambiguous quoted or multipart value. Review one complete SPF policy in Cloudflare; doctor preserved the stored bytes.');
+    }
+    const spf = txt.filter((record) => /^v=spf1(?:\s|$)/i.test(txtValue(record.content) ?? ''));
     if (externalMx(records, config.mailDomain).length || !mailMx.length) throw new Error(`Inbound ${config.mailDomain} is not routed exclusively to Cloudflare. Complete the scoped Email Routing onboarding; keep ${config.zoneName} at its old provider during pilot.`);
     if (spf.length !== 1) throw new Error('Mail domain must have exactly one SPF record. Merge authorizations rather than adding a second SPF record.');
     const sendingNames = [`cf-bounce.${config.mailDomain}`, `cf-bounce._domainkey.${config.mailDomain}`, `_dmarc.${config.mailDomain}`];

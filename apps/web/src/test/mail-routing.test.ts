@@ -136,6 +136,48 @@ describe('scoped DNS wiring', () => {
     expect(fixture.api.dns.records.create).not.toHaveBeenCalled();
   });
 
+  it.each(['cf2024-1', 'cf2026-2'])('accepts the observed five-row quoted preview and leaves managed selector %s to service activation', async selector => {
+    const managed = { type: 'TXT', name: `${selector}._domainkey.example.com`,
+      content: `"v=DKIM1; h=sha256; k=rsa; p=${'A'.repeat(392)}"`, ttl: 1 };
+    const preview = [
+      { type: 'MX', name: 'example.com', content: 'route1.mx.cloudflare.net', priority: 24, ttl: 1 },
+      { type: 'MX', name: 'example.com', content: 'route2.mx.cloudflare.net', priority: 44, ttl: 1 },
+      { type: 'MX', name: 'example.com', content: 'route3.mx.cloudflare.net', priority: 27, ttl: 1 },
+      managed,
+      { type: 'TXT', name: 'example.com', content: '"v=spf1 include:_spf.mx.cloudflare.net ~all"', ttl: 1 }
+    ];
+    fixture.api.emailRouting.dns.get.mockResolvedValue({ success: true, result: preview });
+    await wireMail('zone', 'mail-in-pilot', 'pilot.example.com');
+    expect(fixture.api.dns.records.create.mock.calls.map(([record]) => record.name)).toEqual([
+      'pilot.example.com', 'pilot.example.com', 'pilot.example.com', 'pilot.example.com', '_dmarc.pilot.example.com'
+    ]);
+    expect(records.slice(0, apex.length)).toEqual(apex);
+    expect(records.some(record => record.name === managed.name)).toBe(false);
+    expect(fixture.api.emailRouting.dns.create).toHaveBeenCalledWith({ zone_id: 'zone', name: 'pilot.example.com' });
+    await wireMail('zone', 'mail-in-pilot', 'pilot.example.com');
+    expect(fixture.api.dns.records.create).toHaveBeenCalledTimes(5);
+    expect(fixture.api.dns.records.update).not.toHaveBeenCalled();
+    expect(fixture.api.dns.records.delete).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { name: 'cf2024-1._domainkey.foreign.test', content: 'v=DKIM1; h=sha256; k=rsa; p=AAAA' },
+    { name: 'cf2024-1._domainkey.pilot.example.com', content: 'v=DKIM1; h=sha256; k=rsa; p=AAAA' },
+    { name: 'selector._domainkey.example.com', content: 'v=DKIM1; h=sha256; k=rsa; p=AAAA' },
+    { name: 'cf2024-1._domainkey.example.com', content: '' },
+    { name: 'cf2024-1._domainkey.example.com', content: '"v=DKIM1; h=sha256; k=rsa; p="' },
+    { name: 'cf2024-1._domainkey.example.com', content: 'v=DKIM1; h=sha256; k=rsa; p=not-a-key' },
+    { name: 'cf2024-1._domainkey.example.com', content: 'v=DKIM1; k=rsa; p=AAAA; p=BBBB' },
+    { name: 'cf2024-1._domainkey.example.com', content: '"v=DKIM1; k=rsa; p=AAAA' },
+    { name: 'cf2024-1._domainkey.example.com', content: 'v=spf1 include:_spf.mx.cloudflare.net ~all' }
+  ])('rejects unexpected or malformed shared DKIM preview rows before any write (%j)', async row => {
+    fixture.api.emailRouting.dns.get.mockResolvedValue({ success: true, result: [...expected, { type: 'TXT', ttl: 1, ...row }] });
+    await expect(wireMail('zone', 'mail-in-pilot', 'pilot.example.com')).rejects.toThrow(/DNS/);
+    expect(fixture.api.dns.records.create).not.toHaveBeenCalled();
+    expect(fixture.api.emailRouting.dns.create).not.toHaveBeenCalled();
+    expect(fixture.api.emailSending.subdomains.create).not.toHaveBeenCalled();
+  });
+
   it('propagates DNS failures and never falls back to whole-zone enable', async () => {
     fixture.api.dns.records.create.mockRejectedValue(new Error('DNS permission denied'));
     await expect(wireMail('zone', 'mail-in-pilot', 'pilot.example.com')).rejects.toThrow('DNS permission denied');

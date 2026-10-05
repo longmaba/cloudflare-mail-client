@@ -262,7 +262,8 @@ async function protectedApexDns(zoneId: string, zone: string, existingDkim?: Rea
 /**
  * Read the supported zone DNS preview, then provision only the selected host.
  * The preview's deprecated `subdomain` query has an undocumented response shape,
- * so only apex MX/SPF requirements are mapped to the selected mail domain.
+ * so only apex MX/SPF requirements are mapped to the selected mail domain. The
+ * validated shared routing DKIM is managed by explicit service activation.
  * Existing policies are never replaced and conflicts fail before any write.
  */
 export async function writeDnsRecords(
@@ -277,7 +278,10 @@ export async function writeDnsRecords(
   if (!preview.success || !Array.isArray(preview.result) || !preview.result.length) {
     throw new MailSetupError('Cloudflare returned an unsupported routing DNS preview. Review the selected domain in Cloudflare.');
   }
-  const required = preview.result.map(record => routingDnsRecord(record, zone.name, domain, zoneId));
+  const required = preview.result.flatMap(record => {
+    const planned = routingDnsRecord(record, zone.name, domain, zoneId);
+    return planned ? [planned] : [];
+  });
   if (!required.some(record => record.type === 'MX') ||
       required.filter(record => record.type === 'TXT').length !== 1) {
     throw new MailSetupError('Cloudflare routing DNS preview must contain MX records and one SPF policy.');
@@ -319,10 +323,13 @@ export async function writeDnsRecords(
 }
 
 const dnsContent = (content: string | undefined) => (content ?? '').toLowerCase().replace(/\.$/, '');
+function txtValue(content: string): string {
+  const value = content.trim();
+  return /^"[^"\\]*"$/.test(value) ? value.slice(1, -1) : value;
+}
 function authorizesRouting(content: string): boolean {
   // Accept a single RFC 1035 quoted string without changing its stored bytes.
-  if (/^"[^"\\]*"$/.test(content.trim())) content = content.trim().slice(1, -1);
-  const terms = content.trim().split(/\s+/);
+  const terms = txtValue(content).split(/\s+/);
   const include = terms.findIndex(term => /^\+?include:_spf\.mx\.cloudflare\.net$/i.test(term));
   const terminal = terms.findIndex(term => /^[+?~-]?all$/i.test(term));
   return /^v=spf1$/i.test(terms[0]) && include > 0 && (terminal < 0 || include < terminal);
@@ -336,7 +343,31 @@ async function exactDnsRecords(zoneId: string, name: string): Promise<RecordResp
   return records;
 }
 
-function routingDnsRecord(record: DNSRecord, zone: string, domain: string, zoneId: string): MailDnsCreate {
+function managedRoutingDkim(record: DNSRecord, zone: string): boolean {
+  const suffix = `._domainkey.${zone}`;
+  const name = dnsContent(record.name);
+  const selector = name.endsWith(suffix) ? name.slice(0, -suffix.length) : '';
+  // The documented/live selector is cf2024-1. Recognizing cf<year>-<key> is a
+  // bounded rotation-compatibility assumption, not a published API contract.
+  // This only excludes shared DKIM from writes; other names still fail closed.
+  if (record.type !== 'TXT' || !/^cf\d{4}-[1-9]\d*$/.test(selector) || !record.content) return false;
+  const terms = txtValue(record.content).split(';').map(term => term.trim()).filter(Boolean);
+  if (!/^v\s*=\s*DKIM1$/i.test(terms[0] ?? '')) return false;
+  const tags = new Map<string, string>();
+  for (const term of terms) {
+    const match = /^([a-z]+)\s*=\s*(.+)$/i.exec(term);
+    if (!match || tags.has(match[1].toLowerCase()) || !['v', 'h', 'k', 'p'].includes(match[1].toLowerCase())) return false;
+    tags.set(match[1].toLowerCase(), match[2].trim());
+  }
+  const key = tags.get('p') ?? '';
+  return tags.get('k')?.toLowerCase() === 'rsa' &&
+    (!tags.has('h') || tags.get('h')?.toLowerCase() === 'sha256') &&
+    /^[A-Za-z0-9+/]+={0,2}$/.test(key) && key.length % 4 === 0;
+}
+
+function routingDnsRecord(record: DNSRecord, zone: string, domain: string, zoneId: string): MailDnsCreate | undefined {
+  // Never copy the shared parent selector onto the pilot or write it generically.
+  if (managedRoutingDkim(record, zone)) return undefined;
   const name = record.name === '@' ? zone : dnsContent(record.name);
   if (name !== zone || !record.content) {
     throw new MailSetupError('Cloudflare routing DNS preview contains an unexpected record name or value. No DNS records were changed.');

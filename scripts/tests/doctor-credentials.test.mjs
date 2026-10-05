@@ -29,6 +29,11 @@ function fixture(options = {}) {
     const authorization = request.headers.Authorization;
     calls.push({ path, authorization });
     const isMailConfiguration = path.includes('/email/');
+    if (authorization === `Bearer ${runtimeToken}` && options.runtimeFailure) {
+      if (options.runtimeFailure === 'network') throw new Error(`${deploymentToken} ${runtimeToken} network error`);
+      if (options.nonJsonFailure) return new Response('<html>Temporary provider error</html>', { status: options.runtimeFailure });
+      return new Response(JSON.stringify({ success: false, errors: [{ code: 10000, message: `${deploymentToken} ${runtimeToken} provider error` }] }), { status: options.runtimeFailure });
+    }
     if ((isMailConfiguration && authorization !== `Bearer ${runtimeToken}`) || (authorization === `Bearer ${runtimeToken}` && options.runtimeDenied)) {
       return new Response(JSON.stringify({ success: false, errors: [{ code: 10000, message: `${deploymentToken} ${runtimeToken} rejected` }] }), { status: 403 });
     }
@@ -53,7 +58,7 @@ function fixture(options = {}) {
     else if (path.endsWith('/dns_records')) result = [
       { type: 'MX', name: config.zoneName, content: 'aspmx.l.google.com', priority: 1 },
       { type: 'MX', name: config.mailDomain, content: 'route1.mx.cloudflare.net', priority: 10 },
-      { type: 'TXT', name: config.mailDomain, content: 'v=spf1 include:_spf.mx.cloudflare.net ~all' },
+      ...(options.spfContents ?? ['v=spf1 include:_spf.mx.cloudflare.net ~all']).map((content) => ({ type: 'TXT', name: config.mailDomain, content })),
       ...[`cf-bounce.${config.mailDomain}`, `cf-bounce._domainkey.${config.mailDomain}`, `_dmarc.${config.mailDomain}`].map((name) => ({ type: 'TXT', name, content: 'sending-fixture' })),
     ];
     return new Response(JSON.stringify({ success: true, result, result_info: { total_pages: 1 } }));
@@ -105,6 +110,68 @@ test('runtime permission failures name the right credential and never expose eit
   assert.match(sending.detail, /HTTP 403.*runtime token Email Sending Read\/Edit permissions.*selected account/);
   assert.ok(!JSON.stringify(checks).includes(runtimeToken));
   assert.ok(!JSON.stringify(checks).includes(deploymentToken));
+});
+
+test('provider outages, rate limits and network failures give retry guidance without token-permission advice', async () => {
+  const cases = [
+    [{ runtimeFailure: 502 }, /HTTP 502.*temporarily unavailable.*Rerun doctor/],
+    [{ runtimeFailure: 502, nonJsonFailure: true }, /HTTP 502.*temporarily unavailable.*Rerun doctor/],
+    [{ runtimeFailure: 503 }, /HTTP 503.*temporarily unavailable.*Rerun doctor/],
+    [{ runtimeFailure: 429 }, /HTTP 429.*rate limited.*Wait before rerunning doctor/],
+    [{ runtimeFailure: 'network' }, /could not be reached.*network connection.*rerun doctor/],
+  ];
+  for (const [options, guidance] of cases) {
+    const { inspect, calls } = fixture(options);
+    const checks = await inspect();
+    for (const name of ['Runtime token scope', 'Recipient Email Routing', 'Native sending domain']) {
+      const check = checks.find((entry) => entry.name === name);
+      assert.equal(check.status, 'fail');
+      assert.match(check.detail, guidance);
+      assert.doesNotMatch(check.detail, /permissions|Workers Paid entitlement|docs\/TOKENS/);
+    }
+    const runtimePaths = calls.filter((call) => call.authorization === `Bearer ${runtimeToken}`).map((call) => call.path);
+    assert.equal(new Set(runtimePaths).size, runtimePaths.length, 'Doctor must not retry failed requests automatically');
+    assert.ok(!JSON.stringify(checks).includes(runtimeToken));
+    assert.ok(!JSON.stringify(checks).includes(deploymentToken));
+  }
+});
+
+test('HTTP 401 remains an actionable runtime credential failure', async () => {
+  const { inspect } = fixture({ runtimeFailure: 401 });
+  const checks = await inspect();
+  for (const name of ['Runtime token scope', 'Recipient Email Routing', 'Native sending domain']) {
+    assert.match(checks.find((entry) => entry.name === name).detail, /HTTP 401.*runtime token.*permissions/);
+  }
+});
+
+test('single quoted and unquoted SPF values pass read-only classification without changing provider bytes', async () => {
+  for (const content of ['v=spf1 include:_spf.mx.cloudflare.net ~all', '"v=spf1 include:_spf.mx.cloudflare.net ~all"', '"V=SPF1 include:_spf.mx.cloudflare.net ~all"']) {
+    const spfContents = [content];
+    const { inspect } = fixture({ spfContents });
+    const checks = await inspect();
+    assert.equal(checks.find((check) => check.name === 'Inbound and sending DNS').status, 'pass');
+    assert.deepEqual(spfContents, [content]);
+  }
+});
+
+test('multipart, malformed quoted SPF and duplicate policies remain DNS failures', async () => {
+  const cases = [
+    ['"v=spf1 " "include:_spf.mx.cloudflare.net ~all"'],
+    ['"v=spf1 include:_spf.mx.cloudflare.net ~all'],
+    ['"v=spf1\\032include:_spf.mx.cloudflare.net ~all"'],
+    ['v=spf11 include:_spf.mx.cloudflare.net ~all'],
+    ['v=spf1 include:_spf.mx.cloudflare.net ~all', '"v=spf1 include:_spf.mx.cloudflare.net ~all"'],
+    ['v=spf1 include:_spf.mx.cloudflare.net ~all', '"v=spf1 " "include:_spf.mx.cloudflare.net ~all"'],
+  ];
+  for (const spfContents of cases) {
+    const original = [...spfContents];
+    const { inspect } = fixture({ spfContents });
+    const checks = await inspect();
+    const dns = checks.find((check) => check.name === 'Inbound and sending DNS');
+    assert.equal(dns.status, 'fail');
+    assert.match(dns.detail, /SPF/);
+    assert.deepEqual(spfContents, original);
+  }
 });
 
 test('unavailable billing verification warns without requiring broader token permissions or claiming Paid is verified', async () => {

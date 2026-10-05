@@ -10,8 +10,8 @@ On Windows with Node 24.12.0 and pnpm 10.26.2:
 | --- | --- |
 | Frozen workspace and infrastructure installs | Passed |
 | Workspace type and Svelte checks | Passed, zero errors and warnings |
-| Application tests | 79 files, 761 tests passed |
-| Portable installer tests | 46 tests passed; migration, credential replacement and live API response coverage |
+| Application tests | 79 files, 772 tests passed |
+| Portable installer tests | 50 tests passed; migration, credential replacement and live API response coverage |
 | Infrastructure TypeScript check | Passed |
 | Production Cloudflare build | Passed |
 | Local D1 migrations | All migrations through `0058` applied |
@@ -87,6 +87,14 @@ Explicit named receiving activation for the pilot returned its exact domain,
 state. Cloudflare added the pilot MX/SPF records and its shared parent-zone
 Routing DKIM selector; existing provider records were preserved. Domain
 onboarding, recovery/TOTP and real mail acceptance remain in progress.
+
+The provider's five-record DNS preview includes quoted SPF and shared-parent
+Routing DKIM values. A live onboarding attempt exposed the old MX/SPF-only
+validator rejecting that DKIM row before writes. Regression tests now cover the
+observed preview, validate shared DKIM without copying or overwriting it, and
+preserve strict rejection of unexpected names and malformed values. Doctor
+recognizes simple quoted SPF without changing its bytes and reports provider
+outages separately from credential failures.
 
 A read-only comparison against the original DNS snapshot confirmed all five
 Google apex MX records, the apex SPF record and three existing DKIM records
