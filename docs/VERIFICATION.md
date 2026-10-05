@@ -10,7 +10,7 @@ On Windows with Node 24.12.0 and pnpm 10.26.2:
 | --- | --- |
 | Frozen workspace and infrastructure installs | Passed |
 | Workspace type and Svelte checks | Passed, zero errors and warnings |
-| Application tests | 79 files, 837 tests passed |
+| Application tests | 80 files, 843 tests passed |
 | Portable installer tests | 53 tests passed; migration, credential replacement and live API response coverage |
 | Infrastructure TypeScript check | Passed |
 | Production Cloudflare build | Passed |
@@ -21,6 +21,8 @@ links, administrator security gates, current mailbox grants and assignments,
 attachment access and reply/forward ancestry, complete-message size checks,
 durable inbound receipts, duplicate deliveries, failed enqueue and replay,
 scoped pilot DNS/rules, interrupted state and upgrade ownership/key guards.
+Sent regression tests cover archived sender copies, replied conversations in
+Inbox, recipient isolation, spam/trash exclusion and complete browser mirrors.
 
 The GitHub Actions matrix runs frozen installs, installer tests, checks,
 application tests and production builds on Windows, macOS and Linux. Its
@@ -110,8 +112,11 @@ a changed public key. An already-enabled registration's observed HTTP 409/code
 
 All required live doctor checks pass; optional billing inspection remains a
 warning with scoped credentials. Public DNS resolves Google apex MX and pilot
-receiving/sending records. The owner reports outgoing SPF, DKIM and DMARC pass,
-but its Sent display is under investigation and is not yet accepted.
+receiving/sending records. The owner reports outgoing SPF, DKIM and DMARC pass.
+Read-only database checks confirm the delivered sender copy and received reply
+are stored. The complete browser mirror incorrectly hid Sent because it lacks
+sender delivery roles; Sent now retains the authorized server query and refreshes
+after compose and delivery updates. Live display acceptance is pending.
 
 A read-only comparison against the original DNS snapshot confirmed all five
 Google apex MX records, the apex SPF record and three existing DKIM records
@@ -120,7 +125,7 @@ performed.
 
 Pending evidence includes a fresh real-account installation, independent
 account/domain installation, interrupted live deployment and upgrade preserving
-old mail, real pilot send/receive and SPF/DKIM/DMARC checks, queue/storage faults,
+old mail, Sent display and received attachment opening, queue/storage faults,
 backup/restore and continued Google apex delivery. These are release gates for
 production, not conclusions drawn from mocked tests.
 

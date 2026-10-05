@@ -7,3 +7,16 @@
 /** Max threads seeded into the local mirror per mailbox. Above this the inbox
  *  falls back to remote pagination instead of driving the list from the mirror. */
 export const SEED_THREAD_LIMIT = 1000;
+
+/** Sent requires mailbox-specific sender deliveries, and Snoozed requires a
+ * wake time. Neither is stored in the placement-only mirror, so those views
+ * retain the authorized server query even after a complete mailbox seed. */
+export function threadListUsesMirror(input: {
+  ready: boolean;
+  complete: boolean;
+  placement: string;
+  labelId?: string | null;
+}): boolean {
+  return input.ready && input.complete && !input.labelId
+    && ["inbox", "archived", "spam", "trash"].includes(input.placement);
+}

@@ -81,6 +81,7 @@
 	import { RENDER_CACHE_VERSION } from '@doota/mail-core/mime';
 	import { localdb } from '$lib/client/localdb';
 	import { createSync } from '$lib/client/localdb/sync.svelte';
+	import { threadListUsesMirror } from '$lib/shared/thread-mirror-limits';
 	import { myFolders, threadFolders, moveToFolder, undoMove, createFolder, addThreadLabel, removeThreadLabel } from '$lib/rpc/label.remote';
 	import TagIcon from '@lucide/svelte/icons/tag';
 	import { unread } from '$lib/client/unread.svelte.js';
@@ -422,6 +423,9 @@
 				if (localReady) void sync.onThreadRealtime(evt.threadId);
 				if (!mirrorDriving) void threadQ?.refresh();
 			}
+			// Sent is server-driven: a newly materialized sender copy must appear
+			// even when no thread is open and the placement-only mirror is complete.
+			if (placement === 'sent') await loadThreads(true);
 			return;
 		}
 		// `notification` pings (assigned/note) are the bell's business, not the list's.
@@ -483,9 +487,11 @@
 	const withPin = (thread: ThreadSummary): ThreadSummary =>
 		pinOverride.has(thread.threadId) ? { ...thread, pinnedAt: pinOverride.get(thread.threadId)! } : thread;
 	// A cursor or a few optimistic/delta rows do not prove a complete mailbox.
-	// Capped all-folder seeds and label views retain remote pagination; the
-	// mirror stores placements only and cannot apply the label filter.
-	const localDriving = $derived(localReady && liveRows.complete && !labelId);
+	// Capped seeds, labels, Sent and Snoozed retain remote pagination. The mirror
+	// lacks sender deliveries and snooze times needed for these cross-folder views.
+	const localDriving = $derived(threadListUsesMirror({
+		ready: localReady, complete: liveRows.complete, placement, labelId
+	}));
 	const listSource = $derived(localDriving ? (liveRows.current ?? []) : items);
 	// One list, one paint. Every row already carries pinnedAt (mirror AND the remote
 	// page), so a single stable sort lifts pins to the top by pin time and leaves the
@@ -736,15 +742,15 @@
 		}
 	}
 
-	// Closing the composer (send, discard, or plain close) refreshes the virtual
-	// lists it feeds. Drafts and Scheduled were serving cached results until a
-	// full navigation.
+	// Closing the composer also refreshes Sent immediately after enqueue; the
+	// later send_state push revalidates it when provider processing finishes.
 	watch(
 		[() => compose.open],
 		(cur, prev) => {
 			if (prev?.[0] && !cur[0]) {
 				if (placement === 'drafts') void myDrafts().refresh();
 				if (placement === 'scheduled') void scheduledSends().refresh();
+				if (placement === 'sent') void loadThreads(true);
 			}
 		}
 	);
