@@ -4,6 +4,8 @@
 </script>
 
 <script lang="ts">
+	import { page } from '$app/state';
+	const appName = $derived(page.data.appName ?? 'Domain Mail');
 	// Doota mark — the icon-any artwork (white letter, deep-blue envelope) with no
 	// background badge. `size` auto-selects detail: chip lines ≥40, spine ≥17,
 	// bare below. `variant="mono"` inherits currentColor. On hover the letter
@@ -28,7 +30,7 @@
 
 <span class="doota-logo inline-flex items-center gap-2 leading-none {klass}">
 	{#if kind === 'mono'}
-		<svg width={size} height={size} viewBox="0 0 64 64" fill="currentColor" role="img" aria-label="Doota" class="shrink-0">
+		<svg width={size} height={size} viewBox="0 0 64 64" fill="currentColor" role="img" aria-label={appName} class="shrink-0">
 			<defs>
 				<mask id={uid}>
 					<rect width="64" height="64" fill="white" />
@@ -40,7 +42,7 @@
 			<g transform="rotate(-9 32 22)"><rect x="18" y="7" width="28" height="27" rx="4" /></g>
 		</svg>
 	{:else}
-		<svg width={size} height={size} viewBox="0 0 96 96" fill="none" role="img" aria-label="Doota" class="shrink-0">
+		<svg width={size} height={size} viewBox="0 0 96 96" fill="none" role="img" aria-label={appName} class="shrink-0">
 			<g transform="rotate(-9 48 33)">
 				<g class="doota-letter">
 					<rect x="28" y="16" width="40" height="39" rx="6" fill="#A9C8E8" />
@@ -62,7 +64,7 @@
 		</svg>
 	{/if}
 	{#if wordmark}
-		<span class="font-heading font-extrabold tracking-tight text-foreground" style="font-size:{size * 0.72}px">Doota</span>
+		<span class="font-heading font-extrabold tracking-tight text-foreground" style="font-size:{size * 0.72}px">{appName}</span>
 	{/if}
 </span>
 

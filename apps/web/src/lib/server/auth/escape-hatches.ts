@@ -12,17 +12,19 @@
  * `$context` / `internalAdapter` / auth-schema imports anywhere outside
  * `src/lib/server/auth/`, so this can't regress.
  */
-import { and, eq, gt } from "drizzle-orm";
+import { and, eq, gt, lte, or } from "drizzle-orm";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import { getRequestEvent } from "$app/server";
 import * as schema from "@doota/db/schema";
 import { invalidateDomainCache } from "@doota/db/org-domains";
-import { tryCatch } from "$lib/utils/try-catch.js";
 import type { Auth } from "$lib/server/auth.js";
 import type { ZoneOnboardStatus } from "$lib/server/cloudflare.js";
+import { ensurePersonalMailbox } from "@doota/mail-core/mailbox";
 
 type Ctx = Awaited<Auth["$context"]>;
 type Db = DrizzleD1Database<typeof schema>;
+const GENESIS_LOCK_ID = "cloudflare-mail-client:genesis-lock";
+const RESET_TTL_MS = 10 * 60 * 1000;
 
 /**
  * Better Auth context + db for the current request. `$context` lives only here.
@@ -44,11 +46,12 @@ async function reqCtx(): Promise<{ db: Db; ctx: Ctx }> {
  * Why no sanctioned path: at genesis there is no admin session to authorize
  * `auth.api.createUser` (admin plugin), and `emailAndPassword.disableSignUp`
  * blocks `auth.api.signUpEmail`. So the first credentialed account must be
- * minted through the internal adapter. `databaseHooks.user.create.before` still
- * runs and forces role=superadmin for the first user, so the role isn't set here.
+ * minted through the internal adapter. A durable unique lock serializes genesis
+ * before the first user count check. The lock remains after success, so deleting
+ * all users never reopens public bootstrap.
  *
- * Atomic: if the password link fails the user is rolled back, otherwise the
- * userCount === 0 gate would wedge on retry behind an orphaned, passwordless row.
+ * Roll back a failed setup before releasing the claim. A failed rollback leaves
+ * the claim in place so an operator can repair the partially created account.
  *
  * (The break-glass CLI `scripts/reset-admin.mjs` is a separate floor: it runs
  * outside the Worker runtime with no bindings, so it uses raw wrangler SQL and
@@ -57,32 +60,104 @@ async function reqCtx(): Promise<{ db: Db; ctx: Ctx }> {
 export async function createGenesisSuperadmin(input: {
   name: string;
   email: string;
+  recoveryEmail: string;
+  domain: string;
   password: string;
   image?: string;
 }): Promise<{ id: string }> {
-  const { ctx } = await reqCtx();
-  const createdUser = await ctx.internalAdapter.createUser({
-    email: input.email,
-    name: input.name,
-    image: input.image,
-    createdAt: new Date(),
-    updatedAt: new Date(),
-  });
-  if (!createdUser) throw new Error("Genesis createUser returned no user.");
+  const { db, ctx } = await reqCtx();
+  if (await db.$count(schema.user)) throw new Error("Setup is already completed.");
+  // A worker interrupted before writing its first user leaves a short lease,
+  // which can be retried safely. Completed bootstrap is a permanent lock.
+  await db.delete(schema.verification).where(and(
+    eq(schema.verification.id, GENESIS_LOCK_ID),
+    eq(schema.verification.value, "claimed"),
+    lte(schema.verification.expiresAt, new Date()),
+  ));
+  const claim = await db.insert(schema.verification).values({
+    id: GENESIS_LOCK_ID,
+    identifier: GENESIS_LOCK_ID,
+    value: "claimed",
+    expiresAt: new Date(Date.now() + RESET_TTL_MS),
+  }).onConflictDoNothing().returning({ id: schema.verification.id });
+  if (!claim.length) throw new Error("Setup is already completed or in progress.");
+  if (await db.$count(schema.user)) throw new Error("Setup is already completed.");
 
-  const { error: linkError } = await tryCatch(
-    ctx.internalAdapter.linkAccount({
+  let userId: string | undefined;
+  let orgId: string | undefined;
+  try {
+    const createdUser = await ctx.internalAdapter.createUser({
+      email: input.email.trim().toLowerCase(),
+      name: input.name,
+      image: input.image,
+      recoveryEmail: input.recoveryEmail.trim().toLowerCase(),
+      role: "superadmin",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    if (!createdUser) throw new Error("Genesis createUser returned no user.");
+    userId = createdUser.id;
+
+    await ctx.internalAdapter.linkAccount({
       providerId: "credential",
       accountId: createdUser.id,
       userId: createdUser.id,
       password: await ctx.password.hash(input.password),
-    }),
-  );
-  if (linkError) {
-    await tryCatch(ctx.internalAdapter.deleteUser(createdUser.id));
-    throw linkError;
+    });
+    // At genesis no authenticated organization owner exists. Initialize the
+    // configured domain and its owner once, then use the normal org APIs.
+    orgId = crypto.randomUUID();
+    await db.insert(schema.organization).values({
+      id: orgId,
+      domain: input.domain,
+      name: input.domain,
+      slug: input.domain.replace(/\./g, "-"),
+      status: "pending_zone",
+      createdAt: new Date(),
+    });
+    await db.insert(schema.member).values({
+      id: crypto.randomUUID(),
+      organizationId: orgId,
+      userId,
+      role: "owner",
+      createdAt: new Date(),
+    });
+    await ensurePersonalMailbox(db, {
+      orgId,
+      userId,
+      address: input.email,
+      displayName: input.name,
+    });
+    await db.update(schema.verification).set({
+      value: "completed", expiresAt: new Date("9999-12-31T00:00:00Z"),
+    }).where(eq(schema.verification.id, GENESIS_LOCK_ID));
+    invalidateDomainCache();
+    return { id: userId };
+  } catch (err) {
+    // Remove dependencies explicitly because D1 FK cascades are not dependable.
+    if (userId) {
+      await db.delete(schema.mailboxAccess).where(eq(schema.mailboxAccess.userId, userId));
+      await db.delete(schema.member).where(eq(schema.member.userId, userId));
+    }
+    if (orgId) {
+      await db.delete(schema.mailbox).where(eq(schema.mailbox.orgId, orgId));
+      await db.delete(schema.organization).where(eq(schema.organization.id, orgId));
+    }
+    if (userId) await ctx.internalAdapter.deleteUser(userId);
+    // Unlock only once rollback succeeded. A partially recovered install must
+    // be repaired by an operator rather than creating a second administrator.
+    await db.delete(schema.verification).where(eq(schema.verification.id, GENESIS_LOCK_ID));
+    throw err;
   }
-  return { id: createdUser.id };
+}
+
+/** True even if an operator later deletes every user after initial setup. */
+export async function genesisSetupLocked(db: Db): Promise<boolean> {
+  return !!(await db.query.verification.findFirst({
+    where: and(eq(schema.verification.id, GENESIS_LOCK_ID), or(
+      eq(schema.verification.value, "completed"), gt(schema.verification.expiresAt, new Date()),
+    )), columns: { id: true },
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -140,6 +215,46 @@ export const tokenStore = {
     await db.delete(schema.verification).where(eq(schema.verification.id, id));
   },
 };
+
+/** Bind a Better Auth reset token to the recovery address that received it. */
+export async function rememberRecoveryReset(token: string, userId: string, email: string): Promise<void> {
+  await tokenStore.issue(`recovery-reset:${token}`, JSON.stringify({ userId, email }), RESET_TTL_MS);
+}
+
+async function recoveryResetRecord(token: string): Promise<{ userId: string; email: string } | null> {
+  const record = await tokenStore.peek(`recovery-reset:${token}`);
+  if (!record) return null;
+  let snapshot: { userId: string; email: string };
+  try {
+    snapshot = JSON.parse(record.value);
+    if (!snapshot || typeof snapshot.userId !== "string" || typeof snapshot.email !== "string") return null;
+  } catch { return null; }
+  const { db } = await reqCtx();
+  const user = await db.query.user.findFirst({
+    where: eq(schema.user.id, snapshot.userId), columns: { recoveryEmail: true },
+  });
+  return user?.recoveryEmail === snapshot.email ? snapshot : null;
+}
+
+export async function validRecoveryReset(token: string): Promise<boolean> {
+  return !!(await recoveryResetRecord(token));
+}
+
+/** Only a successful BA password reset proves control of the delivered link. */
+export async function completeRecoveryReset(token: string): Promise<void> {
+  const snapshot = await recoveryResetRecord(token);
+  if (!snapshot) return;
+  const consumed = await tokenStore.consume(`recovery-reset:${token}`);
+  if (!consumed) return;
+  const { db, ctx } = await reqCtx();
+  // A recovery-address change racing redemption must not verify the new address.
+  const [updated] = await db.update(schema.user).set({
+    recoveryEmailVerified: true,
+    recoveryEmailVerifiedAt: Date.now(),
+    mustChangePassword: false,
+  }).where(and(eq(schema.user.id, snapshot.userId), eq(schema.user.recoveryEmail, snapshot.email))).returning();
+  if (updated) await ctx.internalAdapter.refreshUserSessions(updated);
+}
 
 /**
  * Per-key send throttle over the token store: true = allowed (marker set),

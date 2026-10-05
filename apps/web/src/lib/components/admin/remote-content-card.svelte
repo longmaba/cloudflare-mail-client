@@ -13,7 +13,7 @@
 
 	let { orgId }: { orgId: string } = $props();
 
-	const q = orgRemoteContent(orgId);
+	const q = $derived(orgRemoteContent(orgId));
 	let saving = $state(false);
 	// Optimistic override shown while a save is in flight; else the switches
 	// reflect the server value directly (no seed-into-$state effect).

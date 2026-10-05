@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { getRequestEvent } from "$app/server";
+import { assertOutboundSize } from '@doota/mail-core/outbound-size';
 
 type MailFrom = { name: string; email: string; logo?: string | null };
 type Mail = {
@@ -21,19 +22,21 @@ type Mail = {
 export async function sendMail({ to, subject, text, html, from }: Mail) {
   const sender = getRequestEvent().platform?.env.EMAIL_SENDER;
   if (!sender) {
-    console.log("[mailer:dev]", { to, from, subject, text });
+    console.log("[mailer:dev] skipped: EMAIL_SENDER is unavailable");
     return;
   }
   if (!from) {
     console.warn("[mailer] no active sending domain — mail skipped", { to, subject });
     return;
   }
+  const body = html ?? `<p>${text}</p>`;
+  assertOutboundSize({ to: [to], from, subject, text, html: body });
   await sender.send({
     to,
     from,
     subject,
     text,
-    html: html ?? `<p>${text}</p>`,
+    html: body,
   });
 }
 

@@ -2,6 +2,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import * as schema from "@doota/db/schema";
 import { fakeCtx, fakeDb, installEvent, clearEvent } from "./fakes";
+import { makeDb } from "./mail-db";
 
 // invalidateDomainCache is a module-cache clear with real deps we don't want to
 // load; mock it so setOrgLifecycle's call is observable (guards finding F1).
@@ -16,6 +17,7 @@ import {
   setOrgLifecycle,
   purgeUserMemberships,
   createGenesisSuperadmin,
+  genesisSetupLocked,
 } from "$lib/server/auth/escape-hatches.js";
 
 beforeEach(() => {
@@ -151,45 +153,79 @@ describe("purgeUserMemberships", () => {
 });
 
 describe("createGenesisSuperadmin", () => {
-  it("creates the user + credential account and returns the id", async () => {
-    const { ctx, internalAdapter } = fakeCtx();
-    installEvent(fakeDb().db, ctx);
-    internalAdapter.createUser.mockResolvedValueOnce({ id: "u1" });
-    internalAdapter.linkAccount.mockResolvedValueOnce(undefined);
+  const input = { name: "Admin", email: "admin@example.test", recoveryEmail: "rescue@outside.test", domain: "example.test", password: "password123" };
 
-    const res = await createGenesisSuperadmin({
-      name: "A",
-      email: "a@ext.com",
-      password: "pw",
+  async function genesisDb() {
+    const db = await makeDb();
+    const { ctx, internalAdapter } = fakeCtx();
+    internalAdapter.createUser.mockImplementation(async (u) => {
+      await db.insert(schema.user).values({ ...u, id: "u1" });
+      return { ...u, id: "u1" };
     });
+    internalAdapter.deleteUser.mockImplementation(async (id) => {
+      await db.delete(schema.user).where((await import("drizzle-orm")).eq(schema.user.id, id));
+    });
+    installEvent(db, ctx);
+    return { db, ctx, internalAdapter };
+  }
+
+  it("creates a domain-email admin, owner membership and first personal mailbox", async () => {
+    const { db, internalAdapter } = await genesisDb();
+    const res = await createGenesisSuperadmin(input);
     expect(res).toEqual({ id: "u1" });
     expect(internalAdapter.linkAccount).toHaveBeenCalledWith(
-      expect.objectContaining({ userId: "u1", password: "hashed:pw", providerId: "credential" }),
+      expect.objectContaining({ userId: "u1", password: "hashed:password123", providerId: "credential" }),
     );
     expect(internalAdapter.deleteUser).not.toHaveBeenCalled();
+    expect(await db.query.user.findFirst()).toMatchObject({ email: input.email, recoveryEmail: input.recoveryEmail, recoveryEmailVerified: false, role: "superadmin" });
+    expect(await db.query.organization.findFirst()).toMatchObject({ domain: input.domain, status: "pending_zone" });
+    expect(await db.query.member.findFirst()).toMatchObject({ userId: "u1", role: "owner" });
+    expect(await db.query.mailbox.findFirst()).toMatchObject({ address: input.email, isPersonal: true });
+    expect(await genesisSetupLocked(db)).toBe(true);
   });
 
-  it("throws (no rollback) when createUser returns no user", async () => {
-    const { ctx, internalAdapter } = fakeCtx();
-    installEvent(fakeDb().db, ctx);
+  it("releases the setup lock when creating the user fails", async () => {
+    const { db, internalAdapter } = await genesisDb();
     internalAdapter.createUser.mockResolvedValueOnce(undefined);
-
-    await expect(
-      createGenesisSuperadmin({ name: "A", email: "a@ext.com", password: "pw" }),
-    ).rejects.toThrow(/no user/i);
+    await expect(createGenesisSuperadmin(input)).rejects.toThrow(/no user/i);
     expect(internalAdapter.linkAccount).not.toHaveBeenCalled();
     expect(internalAdapter.deleteUser).not.toHaveBeenCalled();
+    expect(await genesisSetupLocked(db)).toBe(false);
   });
 
   it("rolls back the user and rethrows when the password link fails", async () => {
-    const { ctx, internalAdapter } = fakeCtx();
-    installEvent(fakeDb().db, ctx);
-    internalAdapter.createUser.mockResolvedValueOnce({ id: "u1" });
+    const { db, internalAdapter } = await genesisDb();
     internalAdapter.linkAccount.mockRejectedValueOnce(new Error("link failed"));
-
-    await expect(
-      createGenesisSuperadmin({ name: "A", email: "a@ext.com", password: "pw" }),
-    ).rejects.toThrow("link failed");
+    await expect(createGenesisSuperadmin(input)).rejects.toThrow("link failed");
     expect(internalAdapter.deleteUser).toHaveBeenCalledWith("u1");
+    expect(await db.$count(schema.user)).toBe(0);
+    expect(await genesisSetupLocked(db)).toBe(false);
+  });
+
+  it("rejects racing bootstrap attempts before a second user can be created", async () => {
+    const { internalAdapter } = await genesisDb();
+    const outcomes = await Promise.allSettled([createGenesisSuperadmin(input), createGenesisSuperadmin(input)]);
+    expect(outcomes.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    expect(outcomes.filter((r) => r.status === "rejected")).toHaveLength(1);
+    expect(internalAdapter.createUser).toHaveBeenCalledOnce();
+  });
+
+  it("remains locked if an operator later deletes all users", async () => {
+    const { db } = await genesisDb();
+    await createGenesisSuperadmin(input);
+    await db.delete(schema.user);
+    expect(await genesisSetupLocked(db)).toBe(true);
+    await expect(createGenesisSuperadmin(input)).rejects.toThrow(/already completed/i);
+  });
+
+  it("recovers an expired setup claim when interruption created no user", async () => {
+    const { db } = await genesisDb();
+    await db.insert(schema.verification).values({
+      id: "cloudflare-mail-client:genesis-lock", identifier: "cloudflare-mail-client:genesis-lock",
+      value: "claimed", expiresAt: new Date(Date.now() - 1000),
+    });
+    expect(await genesisSetupLocked(db)).toBe(false);
+    expect(await createGenesisSuperadmin(input)).toEqual({ id: "u1" });
+    expect(await genesisSetupLocked(db)).toBe(true);
   });
 });

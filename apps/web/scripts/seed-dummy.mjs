@@ -24,8 +24,10 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const REMOTE = process.argv.includes("--remote");
 const DRY = process.argv.includes("--dry"); // write SQL only, don't touch D1
 
-const ORG_DOMAIN = "ethercorps.io";
-const ORG_NAME = "Ethercorps (seed)";
+if (REMOTE) throw new Error('Dummy seeding is local-only. It never modifies a deployed mailbox.');
+const ORG_DOMAIN = process.env.SEED_DOMAIN || "seed.example.invalid";
+if (!ORG_DOMAIN.endsWith('.invalid')) throw new Error('Synthetic seed domains must end in .invalid.');
+const ORG_NAME = "Demo mailbox (synthetic)";
 const SUPPORT = `support@${ORG_DOMAIN}`;
 const N_PEOPLE = 100;
 const N_THREADS = 100;
@@ -267,7 +269,9 @@ if (DRY) {
 
 const args = ["d1", "execute", "doota", REMOTE ? "--remote" : "--local", "--file", sqlPath, "-y"];
 console.log(`Running: wrangler ${args.join(" ")}`);
-execFileSync("npx", ["wrangler", ...args], { cwd: root, stdio: "inherit" });
+const manifest = JSON.parse(readFileSync(join(root, 'node_modules/wrangler/package.json'), 'utf8'));
+const cli = typeof manifest.bin === 'string' ? manifest.bin : manifest.bin.wrangler;
+execFileSync(process.execPath, [join(root, 'node_modules/wrangler', cli), ...args], { cwd: root, stdio: 'inherit', shell: false, windowsHide: true });
 console.log(`\nSeeded org ${ORG_DOMAIN}: ${N_PEOPLE} people, ${N_THREADS} threads into ${SUPPORT}.`);
 console.log(`Login for any dummy user:  email = <their address>   password = ${SEED_PASSWORD}`);
 console.log(`Example:  ava.rao0@${ORG_DOMAIN} / ${SEED_PASSWORD}`);

@@ -3,7 +3,9 @@ import type { DrizzleD1Database } from "drizzle-orm/d1";
 import type * as schema from "@doota/db/schema";
 import { sendMail } from "./mailer";
 import { renderEmail } from "./email";
-import { senderAddress, domainOf } from "@doota/db/org-domains";
+import { senderAddress, domainOf, isServedDomain } from "@doota/db/org-domains";
+import { MAIL_DOMAIN } from "$app/env/private";
+import { isExternalRecovery } from "./auth/recovery-policy.js";
 import { tokenStore, throttleAllows } from "./auth/escape-hatches.js";
 
 type Db = DrizzleD1Database<typeof schema>;
@@ -21,11 +23,9 @@ type ResetUser = {
 
 /**
  * External address the reset code is sent to (same invariant as the logged-out
- * flow): super-admin → their external primary email; everyone else → their
- * verified recovery email. Never a served-domain inbox. null = no valid target.
+ * flow): every role uses a verified recovery email, never their domain inbox.
  */
 export function resetTarget(user: ResetUser): string | null {
-  if (user.role === "superadmin") return user.email;
   return user.recoveryEmail && user.recoveryEmailVerified
     ? user.recoveryEmail
     : null;
@@ -44,7 +44,7 @@ export async function sendPasswordResetCode(
   user: ResetUser,
 ): Promise<{ ok: boolean; message: string }> {
   const to = resetTarget(user);
-  if (!to) {
+  if (!to || (MAIL_DOMAIN && !isExternalRecovery(to, MAIL_DOMAIN)) || await isServedDomain(db, to)) {
     return {
       ok: false,
       message: "No verified recovery email on file to send a code to.",
@@ -58,13 +58,16 @@ export async function sendPasswordResetCode(
     };
   }
 
-  const code = String(Math.floor(100000 + Math.random() * 900000));
+  // Rejection sampling avoids modulo bias and Math.random() for auth material.
+  const random = new Uint32Array(1);
+  do { crypto.getRandomValues(random); } while (random[0] >= 4_294_800_000);
+  const code = String(100000 + (random[0] % 900000));
   const codeId = `pwreset:${user.id}`;
   // One active code per user: drop any previous one before issuing.
   await tokenStore.dropByIdentifier(codeId);
   await tokenStore.issue(codeId, code, CODE_TTL_MS);
 
-  const fromDomain = user.role === "superadmin" ? undefined : domainOf(user.email);
+  const fromDomain = domainOf(user.email);
   const from = await senderAddress(db, fromDomain);
   const mail = renderEmail("reset-code", { from, code });
   await sendMail({ to, from, subject: mail.subject, text: mail.text, html: mail.html });

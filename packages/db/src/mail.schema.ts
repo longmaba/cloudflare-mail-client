@@ -247,11 +247,36 @@ export const message = sqliteTable(
     createdAt: now(),
   },
   (t) => [
-    uniqueIndex("message_org_msgid_uidx").on(t.orgId, t.messageIdHeader),
+    // Message-ID is sender-controlled metadata, never a trustworthy dedupe key.
+    index("message_org_msgid_idx").on(t.orgId, t.messageIdHeader),
+    uniqueIndex("message_org_raw_uidx").on(t.orgId, t.r2RawKey, t.messageIdHeader),
     // Composite: serves plain thread lookups and latest-message-per-thread
     // (ORDER BY sent_at) without scanning every message in the thread, so the
     // thread-list hot path pays per-thread O(1) instead of O(messages).
     index("message_thread_sent_idx").on(t.threadId, t.sentAt),
+  ],
+);
+
+/** Durable receive/processing journal. Raw content stays encrypted in R2. */
+export const inboundReceipt = sqliteTable(
+  "inbound_receipt",
+  {
+    id: text("id").primaryKey(),
+    orgId: text("org_id").notNull().references(() => organization.id, { onDelete: "cascade" }),
+    mailboxId: text("mailbox_id").notNull().references(() => mailbox.id, { onDelete: "cascade" }),
+    recipient: text("recipient").notNull(),
+    r2RawKey: text("r2_raw_key").notNull(),
+    jobJson: text("job_json").notNull(),
+    status: text("status").notNull().default("stored"),
+    attempts: integer("attempts").notNull().default(0),
+    lastError: text("last_error"),
+    nextAttemptAt: integer("next_attempt_at", { mode: "timestamp_ms" }).notNull(),
+    createdAt: now(),
+    updatedAt: now(),
+  },
+  (t) => [
+    uniqueIndex("inbound_receipt_raw_recipient_uidx").on(t.orgId, t.r2RawKey, t.recipient),
+    index("inbound_receipt_replay_idx").on(t.status, t.nextAttemptAt),
   ],
 );
 

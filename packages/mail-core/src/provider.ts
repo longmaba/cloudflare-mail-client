@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+import { assertOutboundSize, OutboundSizeError } from "./outbound-size";
+
 /**
  * Provider seam. Cloudflare Email Service is the sole provider (public beta — a
  * named dependency risk), behind the `MailProvider` interface. Nothing
@@ -24,7 +26,8 @@ export type OutboundEmail = {
   attachments?: { filename: string; contentType: string; content: ArrayBuffer; contentId?: string }[];
 };
 
-export type SendResult = { providerMessageId: string };
+/** Provider acceptance only. Delivery is confirmed separately by lifecycle events. */
+export type SendResult = { providerMessageId: string; accepted: true };
 
 /** Thrown on send failure. `permanent` → hard (no retry); else soft (retry). */
 export class ProviderSendError extends Error {
@@ -52,15 +55,19 @@ export type ProviderEnv = {
  * which gives BCC-as-envelope-only, custom threading headers, and attachments
  * natively, so no raw MIME is hand-assembled here. The binding sets the DKIM +
  * return-path itself from the onboarded sending subdomain, so envelope-from is
- * not passed. A 4xx/transient failure surfaces as soft (retryable); a 5xx / bad
- * request as permanent. The result carries only a message id — per-recipient
- * outcomes arrive later as DSNs to the return-path (see bounce.ts).
+ * not passed. Typed validation failures are permanent; service/rate failures
+ * remain retryable. A message id confirms acceptance; actual delivery outcomes
+ * arrive separately through lifecycle events (or fallback DSNs).
  */
 class CloudflareProvider implements MailProvider {
   readonly name = "cloudflare";
   constructor(private readonly sender: SendEmail) {}
 
   async send(email: OutboundEmail): Promise<SendResult> {
+    try { assertOutboundSize(email); } catch (error) {
+      if (error instanceof OutboundSizeError) throw new ProviderSendError(error.message, true, error);
+      throw error;
+    }
     // Cloudflare Email Sending only accepts whitelisted + X-* headers and sets
     // Message-ID itself — passing our own is rejected ("custom header 'Message-ID'
     // is not allowed"). Keep the threading headers it does accept; drop the rest.
@@ -110,7 +117,7 @@ class CloudflareProvider implements MailProvider {
       // the runtime warns ("An RPC stub was not disposed properly"). The finally
       // guarantees disposal even if the read throws. Local POJO binding: no-op.
       try {
-        return { providerMessageId: await res.messageId };
+        return { providerMessageId: await res.messageId, accepted: true };
       } finally {
         const d = res as { [Symbol.dispose]?(): void; [Symbol.asyncDispose]?(): Promise<void> };
         const asyncDispose = d[Symbol.asyncDispose];
@@ -122,7 +129,9 @@ class CloudflareProvider implements MailProvider {
       // (retryable) unless the message clearly reads as a permanent rejection.
       // Tighten once Email Service exposes typed errors past beta.
       const msg = e instanceof Error ? e.message : String(e);
-      const permanent = /\b(5\d\d|invalid|malformed|rejected|not allowed)\b/i.test(msg);
+      const code = (e as { code?: string } | null)?.code;
+      const transient = new Set(["E_INTERNAL_SERVER_ERROR", "E_RATE_LIMIT_EXCEEDED", "E_DAILY_LIMIT_EXCEEDED", "E_DELIVERY_FAILED"]);
+      const permanent = code ? code.startsWith("E_") && !transient.has(code) : /\b(invalid|malformed|rejected|not allowed|too large)\b/i.test(msg);
       throw new ProviderSendError(msg, permanent, e);
     }
   }

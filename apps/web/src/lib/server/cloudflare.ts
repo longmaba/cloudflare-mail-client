@@ -1,6 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 import Cloudflare from "cloudflare";
-import { APP_CLOUDFLARE_ACCOUNT_ID, APP_CLOUDFLARE_API_TOKEN } from "$app/env/private";
+import { APP_CLOUDFLARE_ACCOUNT_ID, APP_CLOUDFLARE_API_TOKEN, MAIL_DOMAIN, MAIL_ROUTING_MODE } from "$app/env/private";
+import { assertMailScope } from './routing-policy.js';
+import type { DNSRecord } from 'cloudflare/resources/email-routing/dns';
+import type { RecordCreateParams, RecordResponse } from 'cloudflare/resources/dns/records';
+type MailDnsCreate = Extract<RecordCreateParams, { type: 'MX' | 'TXT' }>;
+
+/** Safe operator-facing setup failures; SDK errors keep their separate handling. */
+export class MailSetupError extends Error {
+  constructor(message: string) { super(message); this.name = 'MailSetupError'; }
+}
 
 /**
  * Cloudflare is the source of truth for all mail wiring. This module is the only
@@ -61,15 +70,6 @@ function isBenignConflict(err: unknown): boolean {
   return /already\s+(exists|enabled|active|been)|duplicate|is enabled/i.test(blob);
 }
 
-async function tolerant<T>(fn: () => Promise<T>): Promise<T | undefined> {
-  try {
-    return await fn();
-  } catch (err) {
-    if (isBenignConflict(err)) return undefined;
-    throw err;
-  }
-}
-
 export type ZoneRef = {
   id: string;
   name: string;
@@ -116,6 +116,9 @@ export async function zoneCreate(domain: string): Promise<ZoneRef> {
 /** Live zone status — used only by the (superadmin) poll, never the hot path. */
 export async function pollZoneStatus(zoneId: string): Promise<ZoneRef> {
   const z = await cf().zones.get({ zone_id: zoneId });
+  if (z.account.id !== APP_CLOUDFLARE_ACCOUNT_ID) {
+    throw new MailSetupError('This Cloudflare zone belongs to a different account than the configured mail instance.');
+  }
   return toZoneRef(z);
 }
 
@@ -131,8 +134,14 @@ export async function findZone(domain: string): Promise<ZoneRef | undefined> {
  * domain" onboarding picker (no manual typing). Super-admin/settings only.
  */
 export async function listZones(): Promise<ZoneRef[]> {
-  const res = await cf().zones.list({ account: { id: APP_CLOUDFLARE_ACCOUNT_ID } });
-  return (res.result ?? []).map((zone) => toZoneRef(zone));
+  const zones: ZoneRef[] = [];
+  for await (const zone of cf().zones.list({ account: { id: APP_CLOUDFLARE_ACCOUNT_ID } })) zones.push(toZoneRef(zone));
+  return zones;
+}
+
+export async function findMailZone(domain: string): Promise<ZoneRef | undefined> {
+  return (await listZones()).filter(zone => domain === zone.name || domain.endsWith(`.${zone.name}`))
+    .sort((a, b) => b.name.length - a.name.length)[0];
 }
 
 export type ZoneDnsRecord = {
@@ -192,44 +201,111 @@ export async function upsertTxtRecord(
   }
 }
 
-/** Enable Email Routing on the zone. Check-first: skip the mutation when
- * already enabled and ready (no audit-log noise, no touched timestamps);
- * `tolerant` still covers the enable racing another writer. */
+/** Enable zone-wide routing only for an explicitly selected apex migration. */
 export async function enableEmailRouting(zoneId: string): Promise<void> {
+  const zone = await pollZoneStatus(zoneId);
+  assertMailScope(zone.name, zone.name, MAIL_DOMAIN ?? '', MAIL_ROUTING_MODE ?? 'manual');
   const current = await cf().emailRouting.get({ zone_id: zoneId }).catch(() => null);
   if (current?.enabled && current?.status === "ready") return;
-  await tolerant(() => cf().emailRouting.enable({ zone_id: zoneId, body: {} }));
+  // Only an explicitly selected apex may use this zone-wide endpoint.
+  await cf().emailRouting.dns.create({ zone_id: zoneId });
 }
 
 /**
- * Provision the zone-level inbound DNS (MX + SPF) Email Routing needs. For a
- * Cloudflare-hosted full zone, `enableEmailRouting` already adds these — the
- * `POST /dns` endpoint's `name` is for a SUBDOMAIN, so passing the zone apex is
- * rejected (422). We therefore only use it for subdomain routing; for the apex
- * this is a best-effort no-name call and any error is non-fatal (enable did it).
- *
- * ponytail: best-effort. If you ever host DNS outside Cloudflare (partial zone),
- * surface the records from `listZoneDnsRecords` and have the operator add them.
+ * Read the supported zone DNS preview, then provision only the selected host.
+ * The preview's deprecated `subdomain` query has an undocumented response shape,
+ * so only apex MX/SPF requirements are mapped to the selected mail domain.
+ * Existing policies are never replaced and conflicts fail before any write.
  */
 export async function writeDnsRecords(
   zoneId: string,
   subdomain?: string,
 ): Promise<void> {
-  try {
-    await cf().emailRouting.dns.create(
-      subdomain
-        ? { zone_id: zoneId, name: subdomain }
-        : { zone_id: zoneId },
-    );
-  } catch (e) {
-    if (!isBenignConflict(e)) console.warn("[cf:dns] routing dns (non-fatal)", e);
+  const c = cf();
+  const zone = await pollZoneStatus(zoneId);
+  const domain = subdomain ?? zone.name;
+  assertMailScope(domain, zone.name, MAIL_DOMAIN ?? '', MAIL_ROUTING_MODE ?? 'manual');
+  const preview = await c.emailRouting.dns.get({ zone_id: zoneId });
+  if (!preview.success || !Array.isArray(preview.result) || !preview.result.length) {
+    throw new MailSetupError('Cloudflare returned an unsupported routing DNS preview. Review the selected domain in Cloudflare.');
+  }
+  const required = preview.result.map(record => routingDnsRecord(record, zone.name, domain, zoneId));
+  if (!required.some(record => record.type === 'MX') ||
+      required.filter(record => record.type === 'TXT').length !== 1) {
+    throw new MailSetupError('Cloudflare routing DNS preview must contain MX records and one SPF policy.');
+  }
+
+  const dmarcName = `_dmarc.${domain}`;
+  const [existing, dmarc] = await Promise.all([
+    exactDnsRecords(zoneId, domain), exactDnsRecords(zoneId, dmarcName)
+  ]);
+  if ([...existing, ...dmarc].some(record => record.type === 'CNAME' || record.type === 'NS')) {
+    throw new MailSetupError('The selected mail DNS name is aliased or delegated. Resolve that conflict before retrying.');
+  }
+  const requiredMx = required.filter(record => record.type === 'MX');
+  if (existing.some(record => record.type === 'MX' &&
+      !requiredMx.some(wanted => dnsContent(record.content) === dnsContent(wanted.content)))) {
+    throw new MailSetupError(`Existing MX records already receive mail for ${domain}. Migrate them explicitly before retrying; no records were changed.`);
+  }
+  const spf = existing.filter(record => record.type === 'TXT' && /^\s*"?v=spf1(?:\s|$)/i.test(record.content ?? ''));
+  if (spf.length > 1 || (spf.length === 1 && !authorizesRouting(spf[0].content ?? ''))) {
+    // Nested includes can exceed SPF's lookup limit. Keep the exact operator
+    // policy and require a reviewed merge instead of guessing at its semantics.
+    throw new MailSetupError(`SPF conflict for ${domain}. Keep one SPF record and merge include:_spf.mx.cloudflare.net before retrying; the existing policy was preserved.`);
+  }
+  const planned = required.filter(wanted => wanted.type === 'MX'
+    ? !existing.some(record => record.type === 'MX' && dnsContent(record.content) === dnsContent(wanted.content))
+    : spf.length === 0);
+  if (!dmarc.some(record => record.type === 'TXT' && /^\s*"?v=DMARC1(?:\s*;|$)/i.test(record.content ?? ''))) {
+    planned.push({ zone_id: zoneId, type: 'TXT', name: dmarcName, content: 'v=DMARC1; p=none', ttl: 1 });
+  }
+  for (const record of planned) {
+    try {
+      await c.dns.records.create(record);
+    } catch (cause) {
+      // A concurrent rerun is benign only if it created this exact requirement.
+      if (!isBenignConflict(cause) || !(await exactDnsRecords(zoneId, record.name)).some(existing =>
+        existing.type === record.type && dnsContent(existing.content) === dnsContent(record.content))) throw cause;
+    }
   }
 }
 
+const dnsContent = (content: string | undefined) => (content ?? '').toLowerCase().replace(/\.$/, '');
+function authorizesRouting(content: string): boolean {
+  // Accept a single RFC 1035 quoted string without changing its stored bytes.
+  if (/^"[^"\\]*"$/.test(content.trim())) content = content.trim().slice(1, -1);
+  const terms = content.trim().split(/\s+/);
+  const include = terms.findIndex(term => /^\+?include:_spf\.mx\.cloudflare\.net$/i.test(term));
+  const terminal = terms.findIndex(term => /^[+?~-]?all$/i.test(term));
+  return /^v=spf1$/i.test(terms[0]) && include > 0 && (terminal < 0 || include < terminal);
+}
+
+async function exactDnsRecords(zoneId: string, name: string): Promise<RecordResponse[]> {
+  const records: RecordResponse[] = [];
+  for await (const record of cf().dns.records.list({ zone_id: zoneId, name: { exact: name }, per_page: 100 })) {
+    if (dnsContent(record.name) === name) records.push(record);
+  }
+  return records;
+}
+
+function routingDnsRecord(record: DNSRecord, zone: string, domain: string, zoneId: string): MailDnsCreate {
+  const name = record.name === '@' ? zone : dnsContent(record.name);
+  if (name !== zone || !record.content) {
+    throw new MailSetupError('Cloudflare routing DNS preview contains an unexpected record name or value. No DNS records were changed.');
+  }
+  if (record.type === 'MX' && /^[a-z0-9.-]+\.mx\.cloudflare\.net\.?$/i.test(record.content) &&
+      Number.isInteger(record.priority) && record.priority! >= 0 && record.priority! <= 65535) {
+    return { zone_id: zoneId, type: 'MX', name: domain, content: record.content, priority: record.priority!, ttl: record.ttl ?? 1 };
+  }
+  if (record.type === 'TXT' && /^\s*"?v=spf1\s/i.test(record.content) && authorizesRouting(record.content)) {
+    return { zone_id: zoneId, type: 'TXT', name: domain, content: record.content, ttl: record.ttl ?? 1 };
+  }
+  throw new MailSetupError('Cloudflare routing DNS preview contains unsupported requirements. Review them in Cloudflare before retrying.');
+}
+
 /**
- * Onboard a SENDING subdomain (outbound DKIM/DMARC/return-path). Cloudflare
- * Email Sending requires a subdomain — the apex is rejected — so this is a no-op
- * unless a subdomain is supplied. Idempotent (create re-enables an existing one).
+ * Onboard the exact sending domain (apex or subdomain), with its own signing
+ * identity and return path. Idempotent: create re-enables an existing domain.
  */
 export async function onboardSendingDomain(
   zoneId: string,
@@ -237,6 +313,8 @@ export async function onboardSendingDomain(
 ): Promise<{ dkimSelector?: string; returnPathDomain?: string }> {
   const name = sendingSubdomain?.trim().toLowerCase();
   if (!name) return {};
+  const zone = await pollZoneStatus(zoneId);
+  assertMailScope(name, zone.name, MAIL_DOMAIN ?? '', MAIL_ROUTING_MODE ?? 'manual');
   const res = await cf().emailSending.subdomains.create({ zone_id: zoneId, name });
   return {
     dkimSelector: res?.dkim_selector,
@@ -269,57 +347,39 @@ export async function inspectZoneMail(zoneId: string): Promise<{
 }
 
 /**
- * Point the zone's catch-all routing rule at the deployed mail-in Worker.
- * `update` is an upsert, so this is idempotent by construction. The
- * check-first read just skips the write when the rule is already enabled
- * and pointed at this worker (a disabled-but-correct rule still falls
- * through so the PUT re-enables it). The read is guarded: on a zone
- * whose routing isn't up yet it can throw, and we'd rather attempt the
- * upsert than fail on the peek.
+ * Attach an apex catch-all to this worker. Existing operator destinations are
+ * preserved, identical rules are skipped, and failed attachment blocks activation.
  */
 export async function createRoutingRule(
   zoneId: string,
   workerName: string,
 ): Promise<void> {
-  const current = await cf().emailRouting.rules.catchAlls.get({ zone_id: zoneId }).catch(() => null);
-  const alreadyWired =
-    current?.enabled &&
-    current.matchers?.some((matcher) => matcher.type === "all") &&
-    current.actions?.some(
-      (action) => action.type === "worker" && action.value?.includes(workerName),
-    );
-  if (alreadyWired) return;
-  try {
-    await cf().emailRouting.rules.catchAlls.update({
-      zone_id: zoneId,
-      actions: [{ type: "worker", value: [workerName] }],
-      matchers: [{ type: "all" }],
-      enabled: true,
-    });
-  } catch (e) {
-    // Mail-in Worker not deployed yet (404 / code 2016) — don't block onboarding.
-    // Routing + DNS are wired; the catch-all can be attached later (Refresh) once
-    // the Worker exists. ponytail: deploy the worker, then re-run to route inbound.
-    const err = e as { status?: number; errors?: Array<{ code?: number }> };
-    const missingWorker =
-      err?.status === 404 || err?.errors?.some((cfError) => cfError.code === 2016);
-    if (missingWorker) {
-      console.warn(`[cf:catchall] Worker "${workerName}" not found — catch-all left unset.`);
-      return;
-    }
-    throw e;
+  const zone = await pollZoneStatus(zoneId);
+  assertMailScope(zone.name, zone.name, MAIL_DOMAIN ?? '', MAIL_ROUTING_MODE ?? 'manual');
+  const current = await cf().emailRouting.rules.catchAlls.get({ zone_id: zoneId }).catch((cause) => {
+    if ((cause as { status?: number })?.status === 404) return null;
+    throw cause;
+  });
+  const ours = current?.matchers?.length === 1 && current.matchers[0].type === 'all' &&
+    current.actions?.length === 1 && current.actions[0].type === 'worker' &&
+    current.actions[0].value?.length === 1 && current.actions[0].value[0] === workerName;
+  if (ours && current?.enabled) return;
+  if (current && !ours && (current.enabled || current.actions?.some(action => action.type !== 'drop'))) {
+    throw new MailSetupError('An existing catch-all belongs to another destination. Review it in Cloudflare before retrying.');
   }
+  // Missing workers and permission failures must prevent an active domain claim.
+  await cf().emailRouting.rules.catchAlls.update({
+    zone_id: zoneId,
+    name: `cloudflare-mail-client:${zone.name}`,
+    actions: [{ type: "worker", value: [workerName] }],
+    matchers: [{ type: "all" }],
+    enabled: true,
+  });
 }
 
 /**
- * Live inbound-routing config for the org's DNS tab: whether Email Routing is on,
- * whether subaddressing (`+`) is honored, and which subdomains have routing MX.
- * All read live from Cloudflare — never persisted (CF is the source of truth).
- *
- * Subdomains are inferred from the zone's MX records that point at Cloudflare
- * Email Routing (`*.mx.cloudflare.net`) whose name sits below the apex.
- * ponytail: MX heuristic. If a customer runs non-CF inbound MX on a subdomain
- * this would miss it — fine, we only manage CF-routed subdomains here.
+ * Live zone routing state. v1 permits only the configured domain; unrelated
+ * subdomains and native sending bounce hosts must not become mailbox choices.
  */
 export type RoutingConfig = {
   enabled: boolean;
@@ -332,53 +392,14 @@ export async function getRoutingConfig(
   zoneId: string,
   apex: string,
 ): Promise<RoutingConfig> {
-  const c = cf();
-  const [settings, subdomains] = await Promise.all([
-    c.emailRouting.get({ zone_id: zoneId }).catch(() => null),
-    listRoutingSubdomains(zoneId, apex).catch(() => [] as string[]),
-  ]);
+  if (apex !== MAIL_DOMAIN) throw new Error('This domain is outside the configured mail instance.');
+  const settings = await cf().emailRouting.get({ zone_id: zoneId }).catch(() => null);
   return {
     enabled: !!settings?.enabled,
     supportSubaddress: !!settings?.support_subaddress,
     status: settings?.status,
-    subdomains,
+    subdomains: [],
   };
-}
-
-async function listRoutingSubdomains(zoneId: string, apex: string): Promise<string[]> {
-  const names = new Set<string>();
-  const suffix = `.${apex}`;
-  for await (const rec of cf().dns.records.list({ zone_id: zoneId, type: "MX" })) {
-    const name = (rec.name ?? "").toLowerCase();
-    const content = (rec.content ?? "").toLowerCase();
-    if (name !== apex && name.endsWith(suffix) && content.endsWith("mx.cloudflare.net")) {
-      names.add(name);
-    }
-  }
-  return [...names].sort();
-}
-
-/**
- * Add a subdomain to the zone's Email Routing (provisions its MX/SPF so
- * `*@sub.apex` is delivered to the same catch-all Worker). Idempotent — CF
- * tolerates re-adding. `sub` must be a full host within the apex.
- */
-export async function addRoutingSubdomain(zoneId: string, sub: string): Promise<void> {
-  await tolerant(() => cf().emailRouting.dns.create({ zone_id: zoneId, name: sub }));
-}
-
-/**
- * Remove a routing subdomain by deleting its Email Routing DNS records (the
- * per-subdomain `dns.delete` endpoint is zone-wide, so we target the records by
- * name via the zone DNS API instead). Safe no-op if nothing matches.
- */
-export async function removeRoutingSubdomain(zoneId: string, sub: string): Promise<void> {
-  const c = cf();
-  const ids: string[] = [];
-  for await (const rec of c.dns.records.list({ zone_id: zoneId, search: sub })) {
-    if ((rec.name ?? "").toLowerCase() === sub) ids.push(rec.id);
-  }
-  for (const id of ids) await tolerant(() => c.dns.records.delete(id, { zone_id: zoneId }));
 }
 
 /**
@@ -390,6 +411,8 @@ export async function removeRoutingSubdomain(zoneId: string, sub: string): Promi
  * this is the one line to fix.
  */
 export async function setSubaddressing(zoneId: string, on: boolean): Promise<void> {
+  const zone = await pollZoneStatus(zoneId);
+  assertMailScope(zone.name, zone.name, MAIL_DOMAIN ?? '', MAIL_ROUTING_MODE ?? 'manual');
   await cf().patch(`/zones/${zoneId}/email/routing`, {
     body: { support_subaddress: on },
   });
@@ -738,14 +761,18 @@ export async function zoneAuditLogs(zoneName: string, days = 30): Promise<AuditE
 export async function wireMail(
   zoneId: string,
   mailInWorkerName: string,
-  sendingSubdomain?: string,
+  domain: string,
 ): Promise<{ dkimSelector?: string; returnPathDomain?: string }> {
-  // Inbound: create the zone routing DNS (MX/SPF/TXT) FIRST — routing only goes
-  // `ready` once the records exist — then enable, then point the catch-all at
-  // our mail-in Worker. (Verified sequence against the CF API.)
-  await writeDnsRecords(zoneId);
-  await enableEmailRouting(zoneId);
-  await createRoutingRule(zoneId, mailInWorkerName);
-  // Outbound sending is only wired when a subdomain is supplied (apex rejected).
-  return onboardSendingDomain(zoneId, sendingSubdomain);
+  const zone = await pollZoneStatus(zoneId);
+  assertMailScope(domain, zone.name, MAIL_DOMAIN ?? '', MAIL_ROUTING_MODE ?? 'manual');
+  if (zone.status !== 'active') throw new MailSetupError('The selected Cloudflare zone is not active.');
+  if (domain === zone.name) {
+    await writeDnsRecords(zoneId);
+    await enableEmailRouting(zoneId);
+    await createRoutingRule(zoneId, mailInWorkerName);
+  } else {
+    // Never enable zone-wide routing here: that endpoint can replace apex MX.
+    await writeDnsRecords(zoneId, domain);
+  }
+  return onboardSendingDomain(zoneId, domain);
 }

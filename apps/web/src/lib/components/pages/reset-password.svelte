@@ -36,7 +36,7 @@
 
 <AuthShell
 	title="Reset password"
-	description="Choose a new password for your Doota account."
+	description={`Choose a new password for your ${page.data.appName ?? 'Domain Mail'} account.`}
 >
 	{#if invalid}
 		<div class="flex flex-col gap-3">

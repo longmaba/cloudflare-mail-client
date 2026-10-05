@@ -15,7 +15,7 @@ cross-frame `postMessage`, downloads, and whole-app functional regressions.
 | `capture-shots.mjs` | docs/README screenshots at four form factors × two themes | `node e2e/capture-shots.mjs [screen…]` |
 
 Both sweeps are **non-destructive**: stars/pins are toggled back, archives are
-undone, nothing is sent (staging may only mail `shivam@doota.dev`) and nothing is
+undone, nothing is sent (use only your own controlled test addresses) and nothing is
 hard-deleted.
 
 ### Selector gotchas these suites encode
@@ -53,7 +53,7 @@ Env (all optional except email/password):
 
 | var | default | notes |
 | --- | --- | --- |
-| `SMOKE_BASE_URL` | `https://mail.emailer.dev` | deployed origin to hit |
+| `SMOKE_BASE_URL` | `http://127.0.0.1:5173` | deployed origin to hit |
 | `SMOKE_EMAIL` | — | **required** — login email |
 | `SMOKE_PASSWORD` | — | **required** — login password |
 | `SMOKE_CHROME` | common OS paths | path to a Chrome/Chromium binary |
@@ -113,7 +113,7 @@ Env:
 | var | default | notes |
 | --- | --- | --- |
 | `SMOKE_LOCAL_FIRST` | — | **required** — opt-in flag; without it the script exits 0 immediately |
-| `SMOKE_BASE_URL` | `https://mail.emailer.dev` | deployed origin to hit |
+| `SMOKE_BASE_URL` | `http://127.0.0.1:5173` | deployed origin to hit |
 | `SMOKE_EMAIL` | — | **required** — login email |
 | `SMOKE_PASSWORD` | — | **required** — login password |
 | `SMOKE_CHROME` | common OS paths | path to a Chrome/Chromium binary |

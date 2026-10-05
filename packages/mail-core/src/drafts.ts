@@ -13,6 +13,8 @@ import { plaintextIndex } from "./search-index";
 import { notifySubmissionState } from "./events-hub";
 import { log, errInfo } from "./log";
 import { FAILED_SEND_STATUSES, RETRYABLE_SEND_STATUSES, htmlToText, stripHtmlTags } from "./mail-thread-contract";
+import { OutboundSizeError } from "./outbound-size";
+import { assertMessageReadable, canReadThread, readableMessageReference } from "./message-access";
 
 /** A draft body is HTML (rich composer). Detect plain-text bodies so legacy/
  * plain content isn't mangled — wrap them into minimal HTML on send. */
@@ -76,8 +78,8 @@ export type AttachmentRef = {
 
 // Server-authoritative attachment limits (never trust the client).
 export const MAX_ATTACHMENTS = 20;
-export const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024; // 25 MB per file
-export const MAX_DRAFT_ATTACH_TOTAL_BYTES = 40 * 1024 * 1024; // 40 MB per draft
+export const MAX_ATTACHMENT_BYTES = 3 * 1024 * 1024;
+export const MAX_DRAFT_ATTACH_TOTAL_BYTES = 3 * 1024 * 1024; // Base64 + bodies + MIME must fit 5 MiB.
 
 const DRAFT_KINDS = ["new", "reply", "reply_all", "forward"] as const;
 export type DraftKind = (typeof DRAFT_KINDS)[number];
@@ -186,6 +188,10 @@ export async function createDraft(
   input: DraftInput,
 ): Promise<DraftDTO> {
   const sender = await resolveSender(db, userId, input.mailboxId, input.fromAliasId ?? null);
+  const actor = { userId };
+  if (input.inReplyToMessageId) await readableMessageReference(db, actor, sender.orgId, input.inReplyToMessageId);
+  for (const id of input.forwardMessageIds ?? []) await assertMessageReadable(db, actor, id, sender.orgId);
+  if (input.threadId && !(await canReadThread(db, actor, input.threadId, sender.orgId))) error(403, "Thread source is not available to this sender.");
   const [subjectEnc, bodyEnc] = await Promise.all([
     encryptContent(ck, input.subject ?? null),
     encryptContent(ck, input.body ?? null),
@@ -549,9 +555,10 @@ export async function stageDraftAttachment(
   if (row.status !== "editing") error(409, "This draft has already been sent.");
   const current = jsonArray<AttachmentRef>(row.attachments);
   if (current.length >= MAX_ATTACHMENTS) error(413, "Too many attachments.");
-  if (file.size > MAX_ATTACHMENT_BYTES) error(413, "Attachment is too large.");
-  const total = current.reduce((n, a) => n + a.size, 0) + file.size;
-  if (total > MAX_DRAFT_ATTACH_TOTAL_BYTES) error(413, "Attachments exceed the total size limit.");
+  const size = file.bytes.byteLength; // Metadata from a caller is never authoritative.
+  if (size > MAX_ATTACHMENT_BYTES || file.size > MAX_ATTACHMENT_BYTES) error(413, "Attachments must be at most 3 MiB to fit Cloudflare's 5 MiB encoded email limit.");
+  const total = current.reduce((n, a) => n + a.size, 0) + size;
+  if (total > MAX_DRAFT_ATTACH_TOTAL_BYTES) error(413, "Attachments must total at most 3 MiB; the complete encoded email must fit 5 MiB.");
 
   const key = `draft/${row.orgId}/${draftId}/${crypto.randomUUID()}`;
   await env.MAIL_RAW.put(key, file.bytes, { httpMetadata: { contentType: file.type } });
@@ -559,7 +566,7 @@ export async function stageDraftAttachment(
     r2Key: key,
     filename: file.name,
     contentType: file.type,
-    size: file.size,
+    size,
   };
   const nextList = [...current, ref];
   await db
@@ -636,8 +643,8 @@ async function copyToOutbound(env: OutboundEnv, ck: ContentKey, orgId: string, r
  * R2 raw. Raw email HTML never reaches the client (read.ts: "Raw HTML never
  * leaves the server"), so a marketing template only forwards with full fidelity
  * if assembled here. Each source is re-checked for the sender's access (a
- * delivery to a mailbox they can see); inaccessible/missing ids are skipped,
- * never errored, so one stale id can't fail the whole send.
+ * delivery to a mailbox they can see, including assignment restrictions).
+ * A revoked source fails closed and leaves the draft editable.
  */
 async function buildForward(
   db: Db,
@@ -649,31 +656,16 @@ async function buildForward(
   cache: CacheLike | null,
 ): Promise<{ html: string; text: string }> {
   if (!messageIds.length) return { html: "", text: "" };
-  const access = await db
-    .select({ mailboxId: mail.mailboxAccess.mailboxId })
-    .from(mail.mailboxAccess)
-    .where(eq(mail.mailboxAccess.userId, userId));
-  const boxes = access.map((a) => a.mailboxId);
   const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const htmlBlocks: string[] = [];
   const textBlocks: string[] = [];
   for (const id of messageIds) {
+    await assertMessageReadable(db, { userId }, id, orgId);
     const m = await db.query.message.findFirst({
       where: and(eq(mail.message.id, id), eq(mail.message.orgId, orgId)),
       columns: { id: true, r2RawKey: true, fromAddr: true, fromName: true, sentAt: true, subjectEnc: true, toAddrs: true, bodyFullEnc: true },
     });
-    if (!m) continue;
-    // Never trust the client's id list — re-check the sender can read this message.
-    const del = boxes.length
-      ? await db.query.delivery.findFirst({
-          where: and(eq(mail.delivery.messageId, id), inArray(mail.delivery.mailboxId, boxes)),
-          columns: { id: true },
-        })
-      : null;
-    if (!del) {
-      log.warn("forward.source_denied", { messageId: id, userId });
-      continue;
-    }
+    if (!m) error(403, "Message source is not available to this sender.");
     // Derive HTML the SAME way the render route does (postal-mime for inbound,
     // JSON for our own outbound) via the shared helper — which also reuses the
     // render route's edge cache (passed in from the platform context), so a
@@ -797,6 +789,7 @@ export async function sendDraft(
       .update(mail.draft)
       .set({ status: "editing" })
       .where(and(eq(mail.draft.id, input.draftId), eq(mail.draft.status, "sending")));
+    if (e instanceof OutboundSizeError) error(413, e.message);
     throw e;
   }
 }

@@ -153,7 +153,7 @@ export async function renderFramedBody(
     }
   }
 
-  const origin = opts.origin ?? "https://app.doota.dev";
+  const origin = opts.origin ?? "https://mail.invalid";
   const { metaCsp } = await buildMetaCsp(origin);
 
   return buildFramedDocument(inner, {

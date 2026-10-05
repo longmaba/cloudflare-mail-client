@@ -53,6 +53,16 @@ beforeEach(async () => {
 const env = () => ({ MAIL_EVENTS: hub as never });
 
 describe("provider event application", () => {
+  it("consumes the current Cloudflare namespaced payload envelope", async () => {
+    await applyProviderEvent(db, env(), {
+      type: "cf.email.sending.message.delivered",
+      payload: { messageId: "<wire1@acme.com>", recipient: "a@ext.com", delivery: { smtpResponse: "250 accepted" } },
+    });
+    const recipient = await db.query.submissionRecipient.findFirst({ where: eq(schema.submissionRecipient.id, "r1") });
+    expect(recipient.status).toBe("delivered");
+    // Other recipients still await delivery; mere provider acceptance is sent.
+    expect((await db.query.submission.findFirst()).status).toBe("sent");
+  });
   it("delivered flips the recipient; all delivered → submission delivered (double tick)", async () => {
     await applyProviderEvent(db, env(), { type: "message.delivered", messageId: "<wire1@acme.com>", recipient: "a@ext.com" });
     let sub = await db.query.submission.findFirst({ where: eq(schema.submission.id, "sub1") });

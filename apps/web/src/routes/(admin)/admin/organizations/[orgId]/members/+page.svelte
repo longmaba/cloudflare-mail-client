@@ -116,7 +116,7 @@
 			<Dialog.Title class="font-heading">Add member</Dialog.Title>
 			<Dialog.Description>
 				A mailbox on <span class="font-mono">{org.domain}</span> is created and an invite with a
-				temporary password is sent to their external recovery address.
+				ten-minute single-use setup link is sent to their external recovery address.
 			</Dialog.Description>
 		</Dialog.Header>
 

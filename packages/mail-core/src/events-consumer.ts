@@ -40,6 +40,13 @@ type ProviderEvent = {
   recipient?: string;
   smtpResponse?: string;
   bounce?: { type?: string };
+  /** Current Queue subscriptions wrap lifecycle details in payload. */
+  payload?: {
+    messageId?: string;
+    recipient?: string;
+    bounce?: { type?: string; reason?: string };
+    delivery?: { smtpResponse?: string };
+  };
 };
 
 type QueueBatch = { messages: { body: unknown; ack(): void; retry(): void }[] };
@@ -62,7 +69,8 @@ export async function applyProviderEvent(
   env: Pick<MailEventsEnv, "MAIL_EVENTS" | "WEBHOOK_QUEUE">,
   evt: ProviderEvent,
 ): Promise<void> {
-  const kind = (evt.type ?? evt.event ?? "").replace(/^message\./, "");
+  if (evt.payload) evt = { ...evt, ...evt.payload, smtpResponse: evt.payload.delivery?.smtpResponse ?? evt.payload.bounce?.reason ?? evt.smtpResponse };
+  const kind = (evt.type ?? evt.event ?? "").replace(/^cf\.email\.sending\./, "").replace(/^message\./, "");
   const providerId = evt.messageId?.trim();
   const address = evt.recipient?.trim().toLowerCase();
   if (!kind || !providerId || !address) {

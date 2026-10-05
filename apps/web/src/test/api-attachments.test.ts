@@ -37,6 +37,12 @@ describe("resolveApiAttachments", () => {
     await expect(resolveApiAttachments(env().env, "o", [{ filename: "a" }])).rejects.toMatchObject({ status: 400 });
   });
 
+  it("rejects another member's raw storage key, even beside uploaded content", async () => {
+    const { env: e, bucket: b } = env();
+    await expect(resolveApiAttachments(e, "org1", [{ filename: "stolen.txt", r2Key: "att/org1/victim", content: b64("decoy") } as never])).rejects.toMatchObject({ status: 400 });
+    expect(b.put).not.toHaveBeenCalled();
+  });
+
   it("rejects more than the max attachment count", async () => {
     const many = Array.from({ length: 21 }, (_, i) => ({ filename: `f${i}`, content: b64("x") }));
     await expect(resolveApiAttachments(env().env, "o", many)).rejects.toMatchObject({ status: 413 });

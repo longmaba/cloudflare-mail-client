@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { APP_NAME } from '$app/env/private';
 import { render } from "@ethercorps/un-jinja";
 import type { MailFrom } from "@doota/db/org-domains";
 import layout from "./templates/_layout.html?raw";
@@ -50,7 +51,7 @@ export type EmailName = keyof typeof TEMPLATES;
 /** Branding context for the layout. `from` carries the org name/logo/address. */
 function brandOf(from?: MailFrom): Brand {
   return {
-    name: from?.name || "Doota",
+    name: from?.name || APP_NAME || "Domain Mail",
     logo: from?.logo ?? null,
     email: from?.email ?? "",
   };

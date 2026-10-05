@@ -2,11 +2,12 @@
 import { command, query, getRequestEvent } from "$app/server";
 import { error } from "@sveltejs/kit";
 import { z } from "zod";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import * as schema from "@doota/db/schema";
 import { can } from "@doota/db/can";
 import { getAuthz } from "$lib/server/authz.js";
 import { invalidateMailboxHolders } from "$lib/server/mail-cache.js";
+import { ensureMailboxRouting, disableMailboxRouting } from '$lib/server/mail-routing.js';
 import {
   createRandomAlias,
   setAliasEnabled,
@@ -32,7 +33,11 @@ async function requireMailboxActor(mailboxId: string) {
 
   const { mailboxIds, orgAdminOf } = await getAuthz();
   const actor = { id: user.id, role: user.role, orgAdminOf };
-  const hasGrant = mailboxIds.includes(mailboxId);
+  const grant = mailboxIds.includes(mailboxId) ? await locals.db.query.mailboxAccess.findFirst({
+    where: and(eq(schema.mailboxAccess.mailboxId, mailboxId), eq(schema.mailboxAccess.userId, user.id)),
+    columns: { canManage: true }
+  }) : undefined;
+  const hasGrant = grant?.canManage === true;
   const orgManage = can(actor, "manage", {
     type: "mailbox",
     ownerId: "",
@@ -74,6 +79,8 @@ export const generateAlias = command(
       host: org.domain,
       label: label ?? null,
     });
+    try { await ensureMailboxRouting(locals.db, box.orgId, alias.address); }
+    catch (cause) { await deleteAliasRow(locals.db, alias.id); throw cause; }
     await invalidateMailboxHolders(mailboxId); // identity lists now include it
     return { success: true as const, ...alias };
   },
@@ -93,8 +100,12 @@ export const toggleAlias = command(
   z.object({ aliasId: z.string().min(1), enabled: z.boolean() }),
   async ({ aliasId, enabled }) => {
     const mailboxId = await aliasMailboxId(aliasId);
-    await requireMailboxActor(mailboxId);
+    const box = await requireMailboxActor(mailboxId);
     const { locals } = getRequestEvent();
+    const alias = await locals.db.query.alias.findFirst({ where: eq(schema.alias.id, aliasId) });
+    if (!alias) error(404, 'Alias not found');
+    if (enabled) await ensureMailboxRouting(locals.db, box.orgId, alias.address);
+    else await disableMailboxRouting(locals.db, box.orgId, alias.address);
     await setAliasEnabled(locals.db, aliasId, enabled);
     await invalidateMailboxHolders(mailboxId); // availability changed
     return { success: true as const };
@@ -103,8 +114,10 @@ export const toggleAlias = command(
 
 export const deleteAlias = command(z.string().min(1), async (aliasId) => {
   const mailboxId = await aliasMailboxId(aliasId);
-  await requireMailboxActor(mailboxId);
+  const box = await requireMailboxActor(mailboxId);
   const { locals } = getRequestEvent();
+  const alias = await locals.db.query.alias.findFirst({ where: eq(schema.alias.id, aliasId) });
+  if (alias) await disableMailboxRouting(locals.db, box.orgId, alias.address);
   await deleteAliasRow(locals.db, aliasId);
   await invalidateMailboxHolders(mailboxId); // identity lists must drop it
   return { success: true as const };

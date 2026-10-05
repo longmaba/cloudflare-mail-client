@@ -5,7 +5,7 @@ import { makeDb } from "./mail-db";
 import { getOnboardingStatus, hasSecurityDebt } from "$lib/server/onboarding";
 
 /**
- * The 2FA + passkey mandate for elevated roles. The incident this guards:
+ * The TOTP mandate for elevated roles. The incident this guards:
  * an admin enrolled a passkey but no TOTP — password sign-in never consults
  * passkeys, so bare credentials logged them in with no second factor.
  */
@@ -43,7 +43,7 @@ beforeEach(async () => {
   db = await makeDb();
 });
 
-describe("secure-account step — both factors mandatory for elevated roles", () => {
+describe("secure-account step — administrator TOTP required, passkeys optional", () => {
   it("passkey WITHOUT TOTP does not satisfy the step (the incident)", async () => {
     await seedAdmin({ twoFactorEnabled: false });
     await addPasskey("a1");
@@ -52,10 +52,11 @@ describe("secure-account step — both factors mandatory for elevated roles", ()
     expect(status.complete).toBe(false);
   });
 
-  it("TOTP WITHOUT a passkey does not satisfy the step either", async () => {
+  it("TOTP WITHOUT a passkey satisfies the step", async () => {
     await seedAdmin({ twoFactorEnabled: true });
     const status = await getOnboardingStatus(db, { id: "a1", role: "admin" });
-    expect(status.steps.find((step) => step.id === "secure-account")?.done).toBe(false);
+    expect(status.steps.find((step) => step.id === "secure-account")?.done).toBe(true);
+    expect(status.complete).toBe(true);
   });
 
   it("TOTP + passkey completes the step", async () => {

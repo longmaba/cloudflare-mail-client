@@ -8,6 +8,7 @@
 	import Lock from '@lucide/svelte/icons/lock';
 	import { tick } from 'svelte';
 	import { invalidateAll } from '$app/navigation';
+	import { page } from '$app/state';
 	import { authClient } from '$lib/client/auth-client';
 	import { toast } from 'svelte-sonner';
 	import { Badge } from '$lib/components/ui/badge';
@@ -114,7 +115,7 @@
 	async function enableTotp(e: SubmitEvent) {
 		e.preventDefault();
 		totpLoading = true;
-		const issuer = `Doota: ${email}`;
+		const issuer = `${page.data.appName || 'Domain Mail'}: ${email}`;
 		const { data: res, error } = await authClient.twoFactor.enable({ password: totpPassword, issuer });
 		totpLoading = false;
 		if (error) {

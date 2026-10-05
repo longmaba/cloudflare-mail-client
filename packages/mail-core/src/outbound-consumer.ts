@@ -12,7 +12,8 @@ import { materializeDelivery } from "./materialize";
 import { sendGrantUserIds } from "./mailbox";
 import { recordNewMail, recordSendFailed } from "./notify";
 import { recordCorrespondents } from "./contacts";
-import { buildQuotedText, buildQuotedHtml, type QuotedParent } from "./mail-thread-contract";
+import { appendQuotedHistory } from "./outbound-content";
+import type { MessageActor } from "./message-access";
 import { chargeSend } from "./send-rate-limit";
 import { selectProvider, ProviderSendError, type OutboundEmail } from "./provider";
 import { extractInlineImages } from "./inline-images";
@@ -37,6 +38,7 @@ export type OutboundConsumerEnv = {
   MAIL_SEARCH_KEY: string;
   EMAIL_SENDER?: SendEmail;
   MAIL_OUT_QUEUE: Queue<OutboundJob>;
+  MAIL_QUEUE?: import("./inbound-worker").MailEnv["MAIL_QUEUE"];
   /** Webhook delivery queue — submission state changes fan out to it. */
   WEBHOOK_QUEUE?: Queue<{ deliveryId: string }>;
   /** Per-user event hub (Durable Object) — wakes live failure streams. */
@@ -391,7 +393,16 @@ export async function processSubmission(
     }
 
     const subject = (await decryptContent(ck, message.subjectEnc)) ?? "";
-    const built = await buildBody(db, env, ck, message);
+    let built: Awaited<ReturnType<typeof buildBody>>;
+    try {
+      built = await buildBody(db, env, ck, message, {
+        userId: sub.createdByUserId,
+        mailboxId: sub.apiKeyId || !sub.createdByUserId ? sub.mailboxId : undefined,
+      });
+    } catch (e) {
+      if (e && typeof e === "object" && "status" in e && e.status === 403) return fail("reply source access revoked");
+      throw e;
+    }
     const { text } = built;
     // Pasted/inserted images are base64 data: URIs in the html — providers strip
     // those, so convert them to inline CID attachments and rewrite the src.
@@ -495,6 +506,7 @@ async function buildBody(
   env: OutboundConsumerEnv,
   ck: Awaited<ReturnType<typeof importKey>>,
   message: typeof schema.message.$inferSelect,
+  actor: MessageActor,
 ): Promise<{ text?: string; html?: string; extraHeaders?: Record<string, string> }> {
   let newText: string | null = null;
   let newHtml: string | null = null;
@@ -522,40 +534,7 @@ async function buildBody(
   }
   if (newText == null) newText = await decryptContent(ck, message.bodyFullEnc);
 
-  if (!message.inReplyTo) {
-    return { text: newText ?? undefined, html: newHtml ?? undefined, extraHeaders };
-  }
-  // Walk the ancestor chain (newest-first) so outbound replies carry full
-  // accumulated history like every provider — bodies are stored quote-stripped,
-  // so one hop alone would drop everything older. Depth cap + seen set guard cycles.
-  const parents: QuotedParent[] = [];
-  const seen = new Set<string>();
-  let ref: string | null = message.inReplyTo;
-  for (let depth = 0; ref && depth < 10 && !seen.has(ref); depth++) {
-    seen.add(ref);
-    const parent: Pick<typeof schema.message.$inferSelect, "fromAddr" | "sentAt" | "bodyFullEnc" | "inReplyTo"> | undefined =
-      await db.query.message.findFirst({
-        where: and(eq(schema.message.orgId, message.orgId), eq(schema.message.messageIdHeader, ref)),
-        columns: { fromAddr: true, sentAt: true, bodyFullEnc: true, inReplyTo: true },
-      });
-    if (!parent) {
-      // RCA breadcrumb: a reply is leaving with less quoted history than expected.
-      log.warn("out.quote_parent_miss", { messageId: message.id, inReplyTo: ref, depth });
-      break;
-    }
-    parents.push({
-      from: parent.fromAddr,
-      sentAt: parent.sentAt ? parent.sentAt.getTime() : null,
-      bodyFull: await decryptContent(ck, parent.bodyFullEnc),
-    });
-    ref = parent.inReplyTo;
-  }
-  if (!parents.length) return { text: newText ?? undefined, html: newHtml ?? undefined, extraHeaders };
-  return {
-    text: buildQuotedText(newText ?? "", parents),
-    html: newHtml ? buildQuotedHtml(newHtml, parents) : undefined,
-    extraHeaders,
-  };
+  return { ...(await appendQuotedHistory(db, ck, message.orgId, actor, message.inReplyTo, newText, newHtml)), extraHeaders };
 }
 
 async function loadAttachments(

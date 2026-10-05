@@ -5,6 +5,19 @@ sidebar:
   order: 5
 ---
 
+<Aside type="caution" title="Upstream reference: use the guided installer">
+
+This page retains upstream Doota implementation details and historical commands.
+For this fork, follow the [current guided setup](https://github.com/longmaba/cloudflare-mail-client#install) using Node 24, pnpm 10
+and `pnpm run setup`; use `pnpm run doctor` for read-only diagnostics and
+`pnpm run upgrade` for published releases. Native sending requires Workers Paid.
+The installer preserves the selected account, domain, resource names and keys.
+Older direct-deploy and automatic-deploy instructions below are historical reference,
+not the installation path for a saved instance. See [current operations](https://github.com/longmaba/cloudflare-mail-client/blob/main/docs/OPERATIONS.md)
+and the [staged pilot guide](https://github.com/longmaba/cloudflare-mail-client/blob/main/docs/KIENG-PILOT.md).
+
+</Aside>
+
 Running Doota is mostly hands-off, but three things are on you: keeping the
 encryption keys safe, backing up all state together, and applying migrations
 carefully.
@@ -113,15 +126,17 @@ If someone is locked out, in order of preference:
    the current password.
 3. **Forgot password** — sends a reset link to the verified external recovery
    address (never the Doota address).
-4. **CLI `reset-admin`** — the floor for a super-admin, with no email or network
-   dependency:
+4. **CLI recovery, existing superadmins only** - from the repository root:
 
    ```sh
-   pnpm --filter doota reset-admin you@external-example.com 'new-password' --remote --clear-2fa
+   pnpm --filter doota reset-admin admin@pilot.kieng.io.vn --remote
    ```
 
-   `--clear-2fa` resets the authenticator too. This always works as long as you
-   hold deploy access.
+   Enter the password at the masked prompt. The command needs Cloudflare
+   access for remote D1, resets an existing superadmin's password and revokes
+   sessions. It cannot create users or mailboxes. Add `--clear-2fa` only for
+   deliberate lost-authenticator recovery, then re-enroll TOTP. Initial
+   administration is provisioned by the protected installer wizard.
 
 ## Logs and observability
 

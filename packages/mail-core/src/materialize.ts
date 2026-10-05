@@ -45,6 +45,8 @@ export type ParsedMessage = {
   text: string | null;
   html: string | null;
   r2RawKey: string | null;
+  /** Inbound identity is the raw content key, never its untrusted Message-ID. */
+  dedupeByRaw?: boolean;
   /** Aligned DMARC pass at ingest (CF Authentication-Results). Drives the
    * verified-sender shield; absent ⇒ unverified (fail-closed). */
   dmarcPass?: boolean;
@@ -179,7 +181,8 @@ async function resolveThreadId(
 }
 
 /**
- * Upsert the shared, immutable message (deduped by org_id + message_id_header).
+ * Upsert the shared, immutable message. Inbound dedupes by org + raw content
+ * key; legacy/import/outbound callers can still resolve owned header IDs.
  * First writer creates it; later recipients of the same email reuse it. Returns
  * the message id + its thread id. Idempotent: a redelivered job that hits an
  * existing row reuses it and re-runs attachments/search harmlessly.
@@ -194,10 +197,15 @@ export async function materializeMessage(
   // still gets indexed via that mailbox's job (the FTS row is per-message).
   searchIndexed = true,
 ): Promise<{ messageId: string; threadId: string }> {
-  // Dedupe by header id — including the provider-minted wire id, so our own
-  // message reflecting back (mailing list, CC to a hosted address) reuses the
-  // sender's row instead of duplicating in the thread.
-  const existing = await findMessageByHeaderId(db, orgId, parsed.messageIdHeader);
+  // Inbound Message-ID cannot select another sender's existing message. Header
+  // lookup remains available for legacy callers and owned outbound identities.
+  const identity = and(eq(schema.message.orgId, orgId),
+    parsed.dedupeByRaw && parsed.r2RawKey
+      ? eq(schema.message.r2RawKey, parsed.r2RawKey)
+      : eq(schema.message.messageIdHeader, parsed.messageIdHeader));
+  const existing = parsed.dedupeByRaw
+    ? await db.query.message.findFirst({ where: identity, columns: { id: true, threadId: true } })
+    : await findMessageByHeaderId(db, orgId, parsed.messageIdHeader);
   if (existing) {
     // Converge attachments + search on re-run without duplicating the message.
     await writeAttachments(db, existing.id, parsed);
@@ -267,10 +275,7 @@ export async function materializeMessage(
   const row =
     inserted[0] ??
     (await db.query.message.findFirst({
-      where: and(
-        eq(schema.message.orgId, orgId),
-        eq(schema.message.messageIdHeader, parsed.messageIdHeader),
-      ),
+      where: identity,
       columns: { id: true, threadId: true },
     }))!;
 

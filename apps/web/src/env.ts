@@ -19,6 +19,9 @@ import { z } from 'zod';
 const optional = z.string().optional();
 
 export const variables = defineEnvVars({
+	APP_NAME: { public: false, schema: optional, description: 'Instance display name.' },
+	MAIL_DOMAIN: { public: false, schema: dev ? optional : z.string().min(3), description: 'Configured mail domain; pilot installs use a subdomain.' },
+	MAIL_ROUTING_MODE: { public: false, schema: z.enum(['manual', 'apex']).optional(), description: 'manual provisions literal subdomain rules; apex explicitly enables apex routing.' },
 	DATABASE_URL: {
 		public: false,
 		description: 'Local D1 database file for drizzle-kit (dev/studio only).',

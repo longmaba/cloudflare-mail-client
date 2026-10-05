@@ -16,6 +16,7 @@
 	const nav = [
 		{ href: '/admin', label: 'Dashboard', icon: LayoutDashboardIcon },
 		{ href: '/admin/organizations', label: 'Organizations', icon: UsersIcon },
+		{ href: '/admin/inbound', label: 'Inbound recovery', icon: MailIcon, superadmin: true },
 		{ href: '/admin/oversight', label: 'Oversight', icon: EyeIcon, superadmin: true }
 	] as const;
 
@@ -30,7 +31,7 @@
 	<Sidebar.Header class="gap-2">
 		<div class="flex items-center gap-2 px-2 pt-1">
 			<Logo size={26} />
-			<span class="font-heading text-lg font-semibold tracking-tight group-data-[collapsible=icon]:hidden">Doota</span>
+			<span class="font-heading text-lg font-semibold tracking-tight group-data-[collapsible=icon]:hidden">{page.data.appName ?? 'Domain Mail'}</span>
 			<span
 				class="text-faint bg-muted ml-auto rounded px-1.5 py-0.5 text-[10px] font-medium tracking-wide uppercase group-data-[collapsible=icon]:hidden"
 			>

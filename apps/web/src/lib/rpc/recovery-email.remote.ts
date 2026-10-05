@@ -8,6 +8,8 @@ import { sendRecoveryEmailVerification } from '$lib/server/recovery-email.js';
 import { tokenStore } from '$lib/server/auth/escape-hatches.js';
 import * as schema from '@doota/db/schema';
 import { tryCatch } from '$lib/utils/try-catch.js';
+import { MAIL_DOMAIN } from '$app/env/private';
+import { isExternalRecovery } from '$lib/server/auth/recovery-policy.js';
 
 // One verification email per user per minute. This endpoint sends mail to an
 // arbitrary external address, so without a throttle it could be used to bomb a
@@ -19,7 +21,7 @@ export const setRecoveryEmail = form(recoveryEmailSchema, async ({ recoveryEmail
 	const { locals, request } = getRequestEvent();
 	if (!locals.user) error(401, 'Not authenticated');
 
-	if (await isServedDomain(locals.db, recoveryEmail)) {
+	if ((MAIL_DOMAIN && !isExternalRecovery(recoveryEmail, MAIL_DOMAIN)) || await isServedDomain(locals.db, recoveryEmail)) {
 		return {
 			success: false,
 			message: 'Recovery email must be external — not on a domain this server hosts.'
@@ -43,12 +45,12 @@ export const setRecoveryEmail = form(recoveryEmailSchema, async ({ recoveryEmail
 		return { success: false, message: 'Unable to update recovery email.' };
 	}
 
-	// Throttle marker only after a successful update (mirrors prior ordering).
-	await tokenStore.issue(throttleId, '1', THROTTLE_WINDOW_MS);
-
 	// Brand from the user's own org domain when its sending path is live.
 	const from = await senderAddress(locals.db, domainOf(locals.user.email));
-	await sendRecoveryEmailVerification(locals.user.id, recoveryEmail, from);
+	if (!from) return { success: false, message: 'Activate domain sending before requesting a recovery verification link.' };
+	await tokenStore.issue(throttleId, '1', THROTTLE_WINDOW_MS);
+	const { error: sendError } = await tryCatch(sendRecoveryEmailVerification(locals.user.id, recoveryEmail, from));
+	if (sendError) return { success: false, message: 'Recovery address saved, but verification could not be sent. Check sending configuration and try again.' };
 	return {
 		success: true,
 		message: 'Verification link sent. Check that inbox to confirm the address.'
@@ -56,19 +58,18 @@ export const setRecoveryEmail = form(recoveryEmailSchema, async ({ recoveryEmail
 });
 
 /**
- * Deferred super-admin email verification. The super-admin's external email is
- * intentionally unverified at genesis (no domain → no sending path). This action
- * becomes usable only once a domain is `active`, so the verification mail has a
- * real path out. Until then the CLI (reset-admin) is the recovery floor.
+ * Deferred administrator recovery verification: bootstrap cannot send until
+ * its domain is active. Keep the existing RPC name for its UI consumers.
  */
 export const requestSuperadminEmailVerification = command(async () => {
 	const { locals } = getRequestEvent();
 	const user = locals.user;
 	if (!user) error(401, 'Not authenticated');
 	if (user.role !== 'superadmin') error(403, 'Super-admin only');
-	if ((user as { emailVerified?: boolean }).emailVerified) {
-		return { success: false, message: 'Your email is already verified.' };
+	if (user.recoveryEmailVerified) {
+		return { success: false, message: 'Your recovery email is already verified.' };
 	}
+	if (!user.recoveryEmail) return { success: false, message: 'Add an external recovery email first.' };
 
 	// Require a working sending path: at least one onboarded (active) domain.
 	const active = await locals.db.query.organization.findFirst({
@@ -82,10 +83,8 @@ export const requestSuperadminEmailVerification = command(async () => {
 		};
 	}
 
-	await tryCatch(
-		locals.auth.api.sendVerificationEmail({
-			body: { email: user.email, callbackURL: '/admin?verified=1' }
-		})
-	);
-	return { success: true, message: 'Verification email sent. Check your external inbox.' };
+	const from = await senderAddress(locals.db, domainOf(user.email));
+	const { error: sendError } = await tryCatch(sendRecoveryEmailVerification(user.id, user.recoveryEmail, from));
+	if (sendError) return { success: false, message: 'Could not send recovery verification. Check your sending configuration.' };
+	return { success: true, message: 'Verification email sent. Check your external recovery inbox.' };
 });

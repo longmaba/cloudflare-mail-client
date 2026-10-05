@@ -6,7 +6,7 @@
 //
 // SKIPS CLEANLY when unconfigured (exit 0), so it never breaks `pnpm test` or a
 // CI job without secrets. To run it, set:
-//   SMOKE_BASE_URL   deployed origin           (default https://mail.emailer.dev)
+//   SMOKE_BASE_URL   deployed origin           (default http://127.0.0.1:5173)
 //   SMOKE_EMAIL      login email               (required)
 //   SMOKE_PASSWORD   login password            (required)
 //   SMOKE_CHROME     path to a Chrome binary   (default: common OS locations)
@@ -15,11 +15,13 @@
 import { existsSync } from "node:fs";
 import puppeteer from "puppeteer-core";
 
-const BASE = process.env.SMOKE_BASE_URL || "https://mail.emailer.dev";
+const BASE = process.env.SMOKE_BASE_URL || "http://127.0.0.1:5173";
 const EMAIL = process.env.SMOKE_EMAIL;
 const PASSWORD = process.env.SMOKE_PASSWORD;
 
 const CHROME_CANDIDATES = [
+ process.env.PROGRAMFILES && `${process.env.PROGRAMFILES}/Google/Chrome/Application/chrome.exe`,
+ process.env.LOCALAPPDATA && `${process.env.LOCALAPPDATA}/Google/Chrome/Application/chrome.exe`,
 	process.env.SMOKE_CHROME,
 	"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
 	"/usr/bin/google-chrome",

@@ -4,7 +4,11 @@ import type { DrizzleD1Database } from "drizzle-orm/d1";
 import * as schema from "@doota/db/schema";
 import * as mail from "@doota/db/mail.schema";
 import { domainOf } from "@doota/db/org-domains";
-import { importKey, putEncryptedBlob } from "./crypto";
+import { importKey, putEncryptedBlob, getDecryptedBlob } from "./crypto";
+import { appendQuotedHistory } from "./outbound-content";
+import { readableMessageReference } from "./message-access";
+import { extractInlineImages } from "./inline-images";
+import { assertOutboundSize } from "./outbound-size";
 import {
   materializeMessage,
   materializeDelivery,
@@ -14,7 +18,7 @@ import {
 import { mintMessageId, threadingHeaders } from "./mail-thread-contract";
 import { recordCorrespondents } from "./contacts";
 import { notifySubmissionState, type EventHubNamespace } from "./events-hub";
-import { log, tryLog } from "./log";
+import { log, tryLog, errInfo } from "./log";
 
 type Db = DrizzleD1Database<typeof schema>;
 
@@ -33,6 +37,8 @@ export type OutboundEnv = {
   MAIL_SEARCH_KEY: string;
   MAIL_RAW: R2Bucket;
   MAIL_OUT_QUEUE: Queue<OutboundJob>;
+  /** Cron recovery for received mail; omitted outside the maintenance worker. */
+  MAIL_QUEUE?: import("./inbound-worker").MailEnv["MAIL_QUEUE"];
   /** Optional per-user event hub — cancel/state writes announce through it. */
   MAIL_EVENTS?: EventHubNamespace;
   /** Optional webhook queue — submission state changes fan out to it. */
@@ -135,14 +141,9 @@ export async function enqueueSend(
   const sentAt = req.sendAt ?? now;
 
   // Parent (reply) for threading — cleartext headers, no decryption.
+  const sourceActor = { userId: req.createdByUserId, mailboxId: req.apiKeyId || !req.createdByUserId ? req.mailboxId : undefined };
   let parent = req.parentMessageId
-    ? await db.query.message.findFirst({
-        where: and(
-          eq(schema.message.orgId, req.orgId),
-          eq(schema.message.messageIdHeader, req.parentMessageId),
-        ),
-        columns: { id: true, messageIdHeader: true, references: true },
-      })
+    ? await readableMessageReference(db, sourceActor, req.orgId, req.parentMessageId)
     : null;
   // Replying to our own message: its stored header id is the internally minted
   // one, but the wire copy carried the provider's Message-ID — the only id the
@@ -165,6 +166,26 @@ export async function enqueueSend(
 
   const ck = await importKey(env.MAIL_DEK);
   const deps = { ck, searchKeyB64: env.MAIL_SEARCH_KEY };
+
+  // Preflight the actual attachment bytes and full quoted/forwarded wire body
+  // BEFORE any message, submission or queue mutation. A draft stays editable.
+  const body = await appendQuotedHistory(db, ck, req.orgId, sourceActor, req.parentMessageId, req.text, req.html);
+  const inline = extractInlineImages(body.html);
+  const attachments: NonNullable<import("./provider").OutboundEmail["attachments"]> = [...inline.images];
+  for (const attachment of req.attachments ?? []) {
+    const bytes = await getDecryptedBlob(env.MAIL_RAW, attachment.r2Key, ck);
+    if (!bytes) throw new Error("An attachment is missing. Reattach it and send again; your draft has been kept.");
+    attachments.push({
+      filename: attachment.filename, contentType: attachment.contentType,
+      content: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
+    });
+  }
+  assertOutboundSize({
+    from: { email: req.fromAddress, name: req.fromName ?? undefined },
+    to: req.to ?? [], cc: req.cc, bcc: req.bcc, subject: req.subject,
+    text: body.text, html: inline.html ?? undefined, attachments,
+    headers: { ...headers, ...req.wireHeaders },
+  });
 
   // Stage the outbound body (text + html) in R2 as the canonical source the
   // consumer builds the wire message from — same "raw lives in R2" pattern as
@@ -301,10 +322,17 @@ export async function enqueueSend(
   // enqueues it when due (consumer idempotency makes a double-enqueue harmless).
   const delaySeconds = Math.ceil((fireAt - now) / 1000);
   if (delaySeconds <= MAX_QUEUE_DELAY_SECONDS) {
-    await env.MAIL_OUT_QUEUE.send(
-      { submissionId },
-      delaySeconds > 0 ? { delaySeconds } : undefined,
-    );
+    try {
+      await env.MAIL_OUT_QUEUE.send(
+        { submissionId },
+        delaySeconds > 0 ? { delaySeconds } : undefined,
+      );
+    } catch (error) {
+      // The durable outbox already owns this send. Returning a failure would
+      // reopen the draft even though cron will send it later, inviting a second
+      // submission. Keep it visibly queued; sweepDueSubmissions retries enqueue.
+      log.warn("out.enqueue_pending", { subId: submissionId, ...errInfo(error) });
+    }
   }
 
   log.info("out.enqueued", { subId: submissionId, from: req.fromAddress, recipients: recips.length, delaySeconds });

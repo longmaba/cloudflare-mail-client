@@ -42,3 +42,7 @@ apps/web/static/file-viewer-runtime.iife.js
 
 # Raw capture output for docs screenshots
 .shots/
+
+# Private instance credentials and local orchestration
+.local/
+.omx/

@@ -23,6 +23,7 @@ import {
 } from "$lib/server/auth/api-key.js";
 import { listSendEvents } from "@doota/mail-core/send-log";
 import { inArray } from "drizzle-orm";
+import { ensureMailboxRouting, disableMailboxRouting } from '$lib/server/mail-routing.js';
 
 /**
  * Mailbox management — shared mailboxes (support@) and access grants. Every
@@ -194,6 +195,7 @@ export const createSharedMailbox = command(
       return { success: false as const, message: `${chosenHost} isn't a configured domain for this org.` };
     }
     const address = `${localPart}@${chosenHost}`;
+    await ensureMailboxRouting(locals.db, orgId, address);
     const id = await upsertMailbox(locals.db, {
       orgId,
       address,
@@ -221,6 +223,11 @@ export const deactivateMailbox = command(
     const { locals } = getRequestEvent();
     const box = await assertManageMailbox(mailboxId);
     if (box.isPersonal) error(400, "Personal mailboxes can't be deactivated here.");
+    const mailbox = await locals.db.query.mailbox.findFirst({ where: eq(schema.mailbox.id, mailboxId) });
+    if (mailbox) {
+      if (active) await ensureMailboxRouting(locals.db, box.orgId, mailbox.address);
+      else await disableMailboxRouting(locals.db, box.orgId, mailbox.address);
+    }
     await locals.db
       .update(mail.mailbox)
       .set({ isActive: active })

@@ -7,8 +7,7 @@ export const loginSchema = z.object({
 	password: Password
 });
 
-// Bootstrap: the first user is the external super-admin. Their login email is
-// their external address, so there is no separate recovery email to collect.
+// Bootstrap: the first user signs in with a domain email; recovery is external.
 export const registerSchema = z.object({
 	email: Email,
 	password: Password,
@@ -21,7 +20,8 @@ export const registerSchema = z.object({
 // The /setup wizard carries the one-time SETUP_TOKEN so the server can gate
 // genesis on deploy access (token) in addition to userCount === 0.
 export const setupSchema = registerSchema.extend({
-	setupToken: z.string().min(1, 'Setup token is required')
+	setupToken: z.string().min(1, 'Setup token is required'),
+	recoveryEmail: Email
 });
 
 export const recoveryEmailSchema = z.object({

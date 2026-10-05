@@ -3,8 +3,6 @@
     import CheckIcon from "@lucide/svelte/icons/check";
     import RecoveryEmailCard from "$lib/components/account/recovery-email-card.svelte";
     import TwoFactorCard from "$lib/components/account/two-factor-card.svelte";
-    import ImportCard from "$lib/components/account/import-card.svelte";
-    import PasskeyCard from "$lib/components/account/passkey-card.svelte";
     import EmailVerifyCard from "$lib/components/account/email-verify-card.svelte";
     import SetPasswordCard from "$lib/components/account/set-password-card.svelte";
     import OnboardDomainCard from "$lib/components/account/onboard-domain-card.svelte";
@@ -28,7 +26,7 @@
             Finish setting up
         </h1>
         <p class="text-muted-foreground text-sm">
-            A few steps before you can access Doota. {doneCount} of {steps.length}
+            A few steps before you can access {data.appName}. {doneCount} of {steps.length}
             done.
         </p>
         <div
@@ -78,7 +76,7 @@
     {/snippet}
 
     {#each steps as step, stepIndex (step.id)}
-        {#if !isEmailVerified && step.id !== "verify-email" && step.id !== "verify-recovery"}
+        {#if !isEmailVerified && step.id !== "verify-email" && step.id !== "verify-recovery" && step.id !== "onboard-domain" && step.id !== "secure-account"}
             <div
                 class="flex items-center gap-3 rounded-xl border bg-card px-4 py-3 shadow-xs opacity-50"
             >
@@ -112,33 +110,16 @@
                         />
                     {:else if step.id === "set-password"}
                         <SetPasswordCard />
-                    {:else if step.id === "secure-account" && isEmailVerified}
+                    {:else if step.id === "secure-account"}
                         <TwoFactorCard
                             enabled={data.account.twoFactorEnabled}
                             email={data.account.email}
                         />
-                        <PasskeyCard passkeys={data.passkeys} />
+                        <p class="text-muted-foreground text-xs">Passkeys are optional. You can add one later in account settings.</p>
                     {/if}
                 </div>
             {/if}
         {/if}
     {/each}
 
-    <!-- Deliberately OUTSIDE the {#each steps}: onboarding is a security gate
-         (recovery email, 2FA, passkey) and nothing optional belongs inside it.
-         An import runs for hours; making it a step would either block people who
-         skip it or make the gate a lie. So it sits below, offered and skippable,
-         and `status.complete` never depends on it. -->
-    <section class="mt-2 flex flex-col gap-2 border-t pt-6">
-        <div class="flex items-baseline justify-between gap-2">
-            <h2 class="font-heading text-sm font-semibold">Bring your mail with you</h2>
-            <span class="text-muted-foreground text-xs">Optional — you can skip this</span>
-        </div>
-        <p class="text-muted-foreground text-xs">
-            Already have mail elsewhere? Import a <span class="font-mono">.mbox</span> export from
-            Gmail, another Doota, or most other mail apps. It lands in Archive under a dated label,
-            so it won't bury anything. You can also do this later from Settings → Mail.
-        </p>
-        <ImportCard />
-    </section>
 </div>

@@ -5,6 +5,19 @@ sidebar:
   order: 3
 ---
 
+<Aside type="caution" title="Upstream reference: use the guided installer">
+
+This page retains upstream Doota implementation details and historical commands.
+For this fork, follow the [current guided setup](https://github.com/longmaba/cloudflare-mail-client#install) using Node 24, pnpm 10
+and `pnpm run setup`; use `pnpm run doctor` for read-only diagnostics and
+`pnpm run upgrade` for published releases. Native sending requires Workers Paid.
+The installer preserves the selected account, domain, resource names and keys.
+Older direct-deploy and automatic-deploy instructions below are historical reference,
+not the installation path for a saved instance. See [current operations](https://github.com/longmaba/cloudflare-mail-client/blob/main/docs/OPERATIONS.md)
+and the [staged pilot guide](https://github.com/longmaba/cloudflare-mail-client/blob/main/docs/KIENG-PILOT.md).
+
+</Aside>
+
 You've [prepared your configuration](/self-hosting/configuration) — now ship
 it. Doota deploys as **one stack**: the three Workers plus everything they
 bind (D1, KV, R2, queues, the Durable Object, the email sender) are declared
@@ -17,8 +30,8 @@ There are two ways to run that command. Pick one:
 
 | Path | Best for | Auth |
 | --- | --- | --- |
-| [**A. From your machine**](#a-deploy-from-your-machine) | First deploy, personal instances, test stages | Browser sign-in, no token |
-| [**B. From GitHub**](#b-auto-deploy-from-github) | Teams, production — every merge to `main` deploys itself | Three repository secrets |
+| [**A. From your machine**](#a-archived-upstream-direct-deployment) | First deploy, personal instances, test stages | Browser sign-in, no token |
+| [**B. From GitHub**](#b-archived-upstream-automatic-deployment) | Teams, production — every merge to `main` deploys itself | Three repository secrets |
 
 Most people start with **A** to see their instance come up, then wire up
 **B** so production stays current without touching a terminal.
@@ -28,7 +41,7 @@ Most people start with **A** to see their instance come up, then wire up
   **and** in `infra/` (`pnpm -C infra install`), and a Cloudflare account.
 </Aside>
 
-## A. Deploy from your machine
+## A. Archived upstream direct deployment
 
 ### 1. Sign in to Cloudflare
 
@@ -92,7 +105,7 @@ deploy, and only the changes go out.
   unrecoverable.** See [Operations](/self-hosting/operations).
 </Aside>
 
-## B. Auto-deploy from GitHub
+## B. Archived upstream automatic deployment
 
 `.github/workflows/deploy.yml` deploys the `prod` stage on **every push
 to `main`** — a merged PR is a push, so once this is set up, shipping Doota
@@ -127,7 +140,7 @@ Add these (names must match exactly — the workflow forwards them as-is):
 | --- | --- | :-: | --- |
 | `CLOUDFLARE_API_TOKEN` | Secret | ✓ | The deploy token from step 1 |
 | `CLOUDFLARE_ACCOUNT_ID` | Secret | ✓ | Your account id (dashboard → Workers & Pages → right sidebar) |
-| `SETUP_TOKEN` | Secret | ✓ | Any string ≥ 8 chars you choose — you'll open `/setup` with it. **The deploy fails without it** |
+| `SETUP_TOKEN` | Secret | required | Use the original installer-generated credential from the saved instance; do not replace it or regenerate keys in CI |
 | `APP_CLOUDFLARE_API_TOKEN` | Secret | for mail | The app's [runtime token](/self-hosting/cloudflare-api-token) — without it, domain onboarding is off |
 | `APP_CLOUDFLARE_ACCOUNT_ID` | Secret | for mail | Same account id (the app provisions in it) |
 | `ORIGINS` | Variable | for domains | Comma-separated full URLs, first canonical — e.g. `https://mail.acme.com`. Unset → workers.dev |

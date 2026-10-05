@@ -11,6 +11,7 @@ export function fakeCtx() {
     createVerificationValue: vi.fn(),
     consumeVerificationValue: vi.fn(),
     updateUser: vi.fn(),
+    refreshUserSessions: vi.fn(),
   };
   const ctx = {
     internalAdapter,

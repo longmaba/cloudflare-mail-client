@@ -2,7 +2,8 @@
 import { redirect } from "@sveltejs/kit";
 import { onboardingHome } from "$lib/server/onboarding.js";
 import { user as userTable } from "@doota/db/schema";
-import { SETUP_TOKEN } from "$app/env/private";
+import { SETUP_TOKEN, MAIL_DOMAIN } from "$app/env/private";
+import { genesisSetupLocked } from "$lib/server/auth/escape-hatches.js";
 
 /**
  * Renders the genesis wizard only when the user count is zero and the one-time
@@ -15,7 +16,7 @@ export const load = async ({ locals, url }) => {
   }
 
   const count = await locals.db.$count(userTable);
-  if (count > 0) {
+  if (count > 0 || await genesisSetupLocked(locals.db)) {
     redirect(
       303,
       "/login?notice=" +
@@ -31,5 +32,5 @@ export const load = async ({ locals, url }) => {
     return { locked: true as const, reason: "bad-token" as const };
   }
 
-  return { locked: false as const, token };
+  return { locked: false as const, token, domain: MAIL_DOMAIN ?? "" };
 };

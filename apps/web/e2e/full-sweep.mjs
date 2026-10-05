@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Full functional sweep against a DEPLOYED stack (staging by default).
 // Non-destructive: stars are toggled back, archives are undone, nothing is sent
-// (staging may only mail shivam@doota.dev) and nothing is hard-deleted.
+// (use only controlled test addresses) and nothing is hard-deleted.
 //
 //   SMOKE_EMAIL=… SMOKE_PASSWORD=… node e2e/full-sweep.mjs [phase]
 //
@@ -9,7 +9,7 @@
 import { existsSync } from "node:fs";
 import puppeteer from "puppeteer-core";
 
-const BASE = process.env.SMOKE_BASE_URL || "https://mail.emailer.dev";
+const BASE = process.env.SMOKE_BASE_URL || "http://127.0.0.1:5173";
 const EMAIL = process.env.SMOKE_EMAIL;
 const PASSWORD = process.env.SMOKE_PASSWORD;
 const ONLY = process.argv[2] ?? "all";

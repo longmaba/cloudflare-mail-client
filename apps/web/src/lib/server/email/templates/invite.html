@@ -1,20 +1,15 @@
 <h1 style="margin:8px 0 12px;font-size:20px;font-weight:700;">You've been invited to {{ brand.name }}</h1>
 <p style="margin:0 0 16px;font-size:14px;line-height:22px;color:#3f3f46;">
-	An account has been created for you at <strong>{{ mailbox }}</strong>. Sign in
-	with the temporary password below — you'll be asked to set your own on first
-	login.
-</p>
-<p style="margin:0 0 20px;text-align:center;">
-	<span style="display:inline-block;font-family:'SF Mono',ui-monospace,Menlo,Consolas,monospace;font-size:20px;font-weight:700;letter-spacing:2px;background:#f4f4f5;border:1px solid #e4e4e7;border-radius:10px;padding:12px 20px;">{{ tempPassword }}</span>
+	An account has been created for you at <strong>{{ mailbox }}</strong>. Choose
+	your password using the link below, then sign in with your domain email.
 </p>
 <p style="margin:0 0 24px;text-align:center;">
-	<a href="{{ loginLink }}" style="display:inline-block;background:#18181b;color:#ffffff;text-decoration:none;padding:12px 24px;border-radius:10px;font-weight:600;font-size:14px;">Sign in</a>
+	<a href="{{ setupLink }}" style="display:inline-block;background:#18181b;color:#ffffff;text-decoration:none;padding:12px 24px;border-radius:10px;font-weight:600;font-size:14px;">Set up your account</a>
 </p>
 <p style="margin:16px 0 0;font-size:12px;line-height:18px;color:#a1a1aa;">
+	This link expires in 10 minutes and can be used once. Completing password setup
+	confirms this inbox as your external recovery address. If it expires, request
+	a new link using your domain email on the Forgot password page.<br />
 	Or paste this link into your browser:<br />
-	<span style="word-break:break-all;color:#3f3f46;">{{ loginLink }}</span>
+	<span style="word-break:break-all;color:#3f3f46;">{{ setupLink }}</span>
 </p>
-{% if recoveryLink %}<p style="margin:16px 0 0;font-size:12px;line-height:18px;color:#a1a1aa;">
-	Confirm this as your recovery email so you can get back in if you're locked out:<br />
-	<span style="word-break:break-all;color:#3f3f46;">{{ recoveryLink }}</span>
-</p>{% endif %}

@@ -4,7 +4,7 @@
 import { existsSync } from "node:fs";
 import puppeteer from "puppeteer-core";
 
-const BASE = process.env.SMOKE_BASE_URL || "https://mail.emailer.dev";
+const BASE = process.env.SMOKE_BASE_URL || "http://127.0.0.1:5173";
 const EMAIL = process.env.SMOKE_EMAIL;
 const PASSWORD = process.env.SMOKE_PASSWORD;
 const CHROME = [process.env.SMOKE_CHROME, "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]

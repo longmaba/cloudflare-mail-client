@@ -5,6 +5,19 @@ sidebar:
   order: 6
 ---
 
+<Aside type="caution" title="Upstream reference: use the guided installer">
+
+This page retains upstream Doota implementation details and historical commands.
+For this fork, follow the [current guided setup](https://github.com/longmaba/cloudflare-mail-client#install) using Node 24, pnpm 10
+and `pnpm run setup`; use `pnpm run doctor` for read-only diagnostics and
+`pnpm run upgrade` for published releases. Native sending requires Workers Paid.
+The installer preserves the selected account, domain, resource names and keys.
+Older direct-deploy and automatic-deploy instructions below are historical reference,
+not the installation path for a saved instance. See [current operations](https://github.com/longmaba/cloudflare-mail-client/blob/main/docs/OPERATIONS.md)
+and the [staged pilot guide](https://github.com/longmaba/cloudflare-mail-client/blob/main/docs/KIENG-PILOT.md).
+
+</Aside>
+
 Common failure modes and where to check. The onboarding health view on
 `/admin/domains` surfaces domain and DNS state live from Cloudflare.
 
@@ -16,11 +29,11 @@ Common failure modes and where to check. The onboarding health view on
     `pending_nameservers`, your registrar isn't pointing at the assigned
     Cloudflare nameservers yet. Hit **Refresh** after DNS propagates.
   </Step>
-  <Step title="Is the catch-all rule set?">
-    Doota points the Email Routing catch-all at `MAIL_IN_WORKER_NAME`. Confirm
-    that variable is the deployed inbound Worker's name (`doota-mail-inbound`),
-    and that Email Routing is enabled on the zone. Re-running onboarding is
-    idempotent — safe to retry.
+  <Step title="Do recipient rules target the saved inbound Worker?">
+    Run `pnpm run doctor`. Pilot addresses need enabled literal rules for
+    each mailbox/alias, targeting the instance's saved inbound Worker.
+    Subdomains cannot use the apex catch-all. Only an explicitly migrated
+    apex uses that catch-all; keep the original provider live during pilot.
   </Step>
   <Step title="Is MX present and correct?">
     Check the zone's DNS for Cloudflare's Email Routing MX records. If your DNS
@@ -64,19 +77,23 @@ URL(s). Redeploy after changing.
 
 The three Workers don't share the same keys. `MAIL_DEK` and `MAIL_SEARCH_KEY`
 must be **identical** on `doota`, `doota-mail-inbound`, and `doota-mail-jobs`.
-Re-set them everywhere and redeploy. If `MAIL_DEK` decodes to the wrong length
-the Worker throws `MAIL_DEK must decode to 32 bytes` — regenerate with
-`openssl rand -base64 32`.
+Restore the original matched keys from the saved instance backup. Never
+regenerate a key for existing mail; the installer blocks key drift.
 
-## Locked out of the super-admin
+## Locked out of the administrator
 
-Use the CLI recovery floor — no email or network needed:
+Try backup codes or password reset to the verified external recovery inbox.
+For operator recovery of an existing superadmin, run from the repository root:
 
 ```sh
-pnpm --filter doota reset-admin you@external-example.com 'new-password' --remote --clear-2fa
+pnpm --filter doota reset-admin admin@pilot.kieng.io.vn --remote
 ```
 
-See [Operations → Recovery hatches](/self-hosting/operations).
+Enter the new password at the masked prompt. Remote recovery needs Cloudflare
+access and targets the saved instance. This command cannot create the first
+user or a mailbox; resume the protected installer wizard for first-run setup.
+Use `--clear-2fa` only for deliberate lost-authenticator recovery and re-enroll
+TOTP afterward. See the [current operations guide](https://github.com/longmaba/cloudflare-mail-client/blob/main/docs/OPERATIONS.md).
 
 ## Live ticks (delivery/read status) not updating
 

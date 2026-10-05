@@ -1,9 +1,20 @@
 # Deploying Doota
 
+> **Upstream reference: use the guided installer.**
+>
+> This page retains upstream Doota implementation details and historical commands.
+> For this fork, follow the [current guided setup](https://github.com/longmaba/cloudflare-mail-client#install) using Node 24, pnpm 10
+> and `pnpm run setup`; use `pnpm run doctor` for read-only diagnostics and
+> `pnpm run upgrade` for published releases. Native sending requires Workers Paid.
+> The installer preserves the selected account, domain, resource names and keys.
+> Older direct-deploy and automatic-deploy instructions below are historical reference,
+> not the installation path for a saved instance. See [current operations](https://github.com/longmaba/cloudflare-mail-client/blob/main/docs/OPERATIONS.md)
+> and the [staged pilot guide](https://github.com/longmaba/cloudflare-mail-client/blob/main/docs/KIENG-PILOT.md).
+
 This folder is the deployment tooling for the whole project. It describes the
 three Workers Doota runs on and everything they need — databases, queues,
 storage, secrets — as one [Alchemy](https://alchemy.run) stack, so you can go
-from a fresh clone to a running mail server with two commands.
+from a fresh clone to a deployed application through the guided installer.
 
 If you just want to deploy, read [Your first deploy](#your-first-deploy) and
 stop there. The rest explains how it behaves and how to operate it over time.
@@ -15,12 +26,12 @@ Doota is three Cloudflare Workers sharing one set of resources:
 | Worker | What it does |
 | --- | --- |
 | `doota` (web) | The SvelteKit app — UI, API, auth |
-| `doota-mail-inbound` (mail-in) | Receives email (Email Routing catch-all) and consumes the inbound queue |
+| `doota-mail-inbound` (mail-in) | Receives email through literal recipient rules (apex catch-all only after cutover) and consumes the inbound queue |
 | `doota-mail-jobs` (mail-jobs) | Sends email (outbound queue consumer), runs the 5-minute cron sweep, hosts the `MailEventHub` Durable Object |
 
 Shared between them: a D1 database, a KV namespace (auth/session cache), an R2
 bucket (raw mail, encrypted), three queues (inbound / outbound / delivery
-events), and the Cloudflare Email Service sender binding.
+events), an inbound dead-letter queue, and the Cloudflare Email Service sender binding.
 
 You don't create any of this by hand. The stack (`alchemy.run.ts`) declares
 all of it; deploying reconciles reality against the declaration and only
@@ -32,49 +43,51 @@ Files in this folder:
 | --- | --- |
 | `alchemy.run.ts` | The stack — resources, workers, bindings, outputs |
 | `env.ts` | Reads `infra/.env`, validates the VAPID pair, turns `ORIGINS` into custom domains |
-| `secrets.ts` | Mint-once secret machinery (see [Secrets](#secrets-you-probably-dont-need-to-set-any)) |
+| `secrets.ts` | Mint-once secret machinery (see [Secrets](#secrets-upstream-fallback-and-installer-ownership)) |
 | `.env.example` | Documented template for your local `infra/.env` |
 
 ## Prerequisites
 
-- A Cloudflare account (free tier works; Email Routing needs a zone on it
-  eventually, but not for a test deploy).
-- Node ≥ 22.18 and pnpm. Older Node 22.x also works — the scripts in this
-  package add the `--experimental-strip-types` flag alchemy needs there.
-- `pnpm install` run at the repo root AND in this folder (`pnpm -C infra install` — standalone lockfile).
+- Node 24, pnpm 10 and Git.
+- An active Cloudflare DNS zone and separate deployment/runtime credentials.
+- Workers Paid for native outbound sending: $5/month base, 3,000 outbound
+  emails included monthly, with additional usage charges.
 
 ## Your first deploy
 
-From the repo root:
+From the repository root, run:
 
 ```sh
-cd infra
-pnpm alchemy login    # opens the browser, sign in to Cloudflare; saved to ~/.alchemy
-cd ..
-pnpm infra:deploy     # builds the web app, then deploys the stack
+pnpm run setup
 ```
 
-The only value you must invent first is `SETUP_TOKEN` (min 8 chars — it's how
-you'll create the first admin at `/setup`): put it in `infra/.env`. Every
-other secret mints itself — see
-[Secrets](#secrets-you-probably-dont-need-to-set-any). When the deploy
-finishes it prints the stack outputs; `webUrl` is your running app:
+The guided installer installs both locked dependency sets, selects the account
+and zone, detects existing provider MX, saves stable keys and configuration in
+the private `.local/` directory, and provisions the three application Workers
+plus storage and queues. It opens protected administrator setup and runs
+read-only doctor checks automatically. Missing pilot DNS remains pending.
 
-```
-webUrl: https://doota-dev-yourname.your-account.workers.dev
-```
-
-Your deploy landed on **your own stage** (more below), with its own empty
-database — the full schema is applied automatically during the deploy. Open
-`<webUrl>/setup` with your `SETUP_TOKEN` to create the first admin.
-
-To preview what a deploy *would* do without changing anything:
+Use an administrator address on the selected mail domain and a separate
+external recovery address. Complete domain activation, recovery verification
+and authenticator TOTP in the web wizard. The one-use resume URL is saved in
+`.local/bootstrap.json`; keep it private. `reset-admin` only recovers an
+existing superadmin and cannot provision the first account.
 
 ```sh
-pnpm infra:plan
+pnpm run doctor
+pnpm run upgrade
 ```
 
-## Stages: why your deploy can't break anything
+Keep `.local/`, the original keys and Alchemy state together. A saved instance
+uses slug-and-stage resource names and blocks account/stage/key drift. Use
+the [current operations guide](https://github.com/longmaba/cloudflare-mail-client/blob/main/docs/OPERATIONS.md) before migrations or restore.
+
+## Stages: upstream implementation reference
+
+The following examples describe upstream developer stages. The guided installer
+pins the saved instance slug and `prod` stage, prefixes the stack namespace with
+the slug, and blocks collisions or stage changes. Do not use these examples
+to deploy or destroy a saved mail instance; use `setup`/`upgrade` instead.
 
 Every deploy targets a **stage**. Unless you say otherwise, that's
 `dev_<your-username>` — and on EVERY stage, every physical resource name
@@ -99,7 +112,14 @@ Never deploy `--stage production` — the stack hard-rejects it. That retired
 stage's state (from an early bare-name deploy) claims the manually-managed
 bare workers, and reusing it would rename/delete them.
 
-## Secrets: you probably don't need to set any
+## Secrets: upstream fallback and installer ownership
+
+The installer generates and saves `MAIL_DEK`, `MAIL_SEARCH_KEY`,
+`BETTER_AUTH_SECRET` and `SETUP_TOKEN` in private `.local/secrets.json`,
+then supplies the same values on every deploy. Back up these files and keys.
+The VAPID pair and infrastructure state remain in Alchemy state. The mint-once
+fallback described below is upstream implementation detail, not permission
+to replace an installed key.
 
 The app needs several secrets (a content-encryption key, an HMAC key, an auth
 signing secret, a web-push keypair). The stack follows one rule for all of
@@ -109,8 +129,8 @@ them:
 > minted on the first deploy and stored in the stack's state store — and every
 > later deploy, from your machine or from CI, reuses that exact value.**
 
-So a fresh deployment genuinely needs zero secret setup. Nothing is written
-to disk; the state store (in Cloudflare) is the source of truth. Each deploy
+In the upstream fallback, absent core secrets are minted into Cloudflare state.
+The guided installer instead saves stable core secrets to private local files. Each deploy
 prints a `secretSources` output telling you, per secret, whether the bound
 value came from `env` or `state`.
 
@@ -122,7 +142,7 @@ What's minted vs. what you must provide:
 | `MAIL_SEARCH_KEY` | Minted (search/token HMAC key) |
 | `BETTER_AUTH_SECRET` | Minted (session signing) |
 | `VAPID_PUBLIC_KEY` + `VAPID_PRIVATE_KEY` | Minted **as a pair** (it's a real P-256 keypair — providing only one half is an error) |
-| `SETUP_TOKEN` | **Deploy fails.** Required from the deployer (min 8 chars) — you must know it to open `/setup` and create the first admin |
+| `SETUP_TOKEN` | Installer-generated one-use bootstrap credential, persisted locally and reused; first-admin provisioning requires the protected wizard |
 | `CRON_SECRET`, `APP_CLOUDFLARE_ACCOUNT_ID`, `APP_CLOUDFLARE_API_TOKEN` | Not minted — the features that use them stay off |
 
 Why the two mail keys are special: mail content is encrypted under
@@ -142,7 +162,7 @@ Where to put values:
 
 - **Locally**: `cp .env.example .env` in this folder (gitignored), fill in
   what you need. Shell-exported vars override the file.
-- **CI**: GitHub repository secrets/variables — see [CI](#ci-auto-deploy-from-github).
+- **CI**: GitHub repository secrets/variables — see [CI](#ci-upstream-auto-deploy-reference).
 
 **Required from the deployer** — the stack deploys without these, but each
 absence disables something essential; set all four for a working mail
@@ -156,8 +176,8 @@ instance: `ORIGINS`, `SETUP_TOKEN`, `APP_CLOUDFLARE_ACCOUNT_ID`,
   Example: `ORIGINS=https://mail.example.com, https://mail.other.org`.
   Leave it unset and the app serves on workers.dev, deriving its URL from
   the worker's own address automatically.
-- **`SETUP_TOKEN`** — gate for the one-time `/setup` genesis wizard. Pick any
-  string, deploy, open `<webUrl>/setup`, present the token.
+- **`SETUP_TOKEN`** - the installer generates the protected wizard credential.
+  Use the saved private bootstrap link instead of inventing a short token.
 - **`APP_CLOUDFLARE_ACCOUNT_ID` / `APP_CLOUDFLARE_API_TOKEN`** — the app's
   *runtime* Cloudflare token. See [Two Cloudflare tokens](#two-cloudflare-tokens).
 - **`UNSUBSCRIBE_URL`**, **`LOG_LEVEL`** — see `.env.example`.
@@ -172,6 +192,12 @@ committed `.sql` files, never generate schema.
 
 ## Two Cloudflare tokens
 
+For this fork, the runtime token is restricted to the selected existing zone.
+It needs Zone Read, DNS Edit, Email Routing Rules/Settings Edit and Email Sending
+Edit; account diagnostics may require Account/Email Sending Read. New-zone
+creation and all-zone runtime scope below describe upstream capabilities,
+not the installer contract.
+
 Doota needs two **different** API tokens, because deploying the system and
 running it require different powers. Never reuse one for the other, and never
 use the Global API Key for either.
@@ -179,7 +205,7 @@ use the Global API Key for either.
 1. **Deploy token — `CLOUDFLARE_API_TOKEN`** (CI secret / your OAuth login
    locally). Used only at deploy time by Alchemy to create and update
    workers, database, storage, and queues. Permissions in
-   [CI](#ci-auto-deploy-from-github) below. It never reaches the running app.
+   [CI](#ci-upstream-auto-deploy-reference) below. It never reaches the running app.
 
 2. **App runtime token — `APP_CLOUDFLARE_API_TOKEN`** (worker secret, set via
    this stack's env). Used by the *running web app* when an org onboards a
@@ -196,7 +222,12 @@ use the Global API Key for either.
    Leave it unset and the app still runs — domain onboarding is simply
    disabled until you add it.
 
-## CI: auto-deploy from GitHub
+## CI: upstream auto-deploy reference
+
+This fork uses an explicit manually triggered deployment workflow, not automatic
+production deployment on every merge. Use the root README and current operations
+guide for the saved instance's metadata and keys; do not run the historical
+adoption or retired-stage instructions below.
 
 `.github/workflows/deploy.yml` deploys `--stage production` on every push to
 `main` (a merged PR is a push to main). To enable it on your fork/repo, set
@@ -249,15 +280,14 @@ deliberately has no adopt-the-bare-names path.
 
 - **`AuthError: No credentials configured`** — run `pnpm alchemy login` in
   this folder (or in CI, check the two repository secrets).
-- **`Unknown file extension ".ts"`** — your Node is older than 22.18 *and*
-  you invoked `alchemy` directly instead of via the pnpm scripts (which add
-  the type-stripping flag).
+- **`Unknown file extension ".ts"`** - use Node 24 and the portable Node
+  launcher through the guided installer.
 - **Auth routes 404 after deploy** — the URL you're visiting must be in the
   app's `ORIGINS`. If you front the worker with another host, add that origin
   to `ORIGINS` (full URL, with protocol).
 - **Deploy fails on a queue consumer** — a queue allows exactly one Worker
   consumer; if the queue already has one from another script, the deploy
   fails rather than silently stealing it.
-- **Wrong/renamed stage cleanup** — `pnpm --filter @doota/infra destroy
-  --stage <name>` removes that stage's resources. Never run it against
-  `production`.
+- **Wrong account/stage/key** - stop and restore the original saved metadata;
+  the installer refuses to rename or destroy a saved mail instance. Use current
+  operations before any manual resource removal.

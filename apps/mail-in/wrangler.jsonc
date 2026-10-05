@@ -10,7 +10,7 @@
   "keep_vars": true,
   "main": "src/index.ts",
   "observability": {
-    "enabled": false,
+    "enabled": true,
     "head_sampling_rate": 1,
     "logs": {
       "enabled": true,
@@ -19,7 +19,7 @@
       "invocation_logs": true
     },
     "traces": {
-      "enabled": false,
+      "enabled": true,
       "persist": true,
       "head_sampling_rate": 1
     }
@@ -36,7 +36,7 @@
   "kv_namespaces": [
     {
       "binding": "AUTH_KV",
-      "id": "9f20318e054a4f56a03e594eedd32c60"
+      "id": "00000000000000000000000000000000"
     }
   ],
   // Per-user mail event hub (lives in doota-mail-jobs): DSN-fallback bounces
@@ -76,7 +76,7 @@
     {
       "binding": "DB",
       "database_name": "doota",
-      "database_id": "f60f6cbf-7936-4169-90a8-a8555793aa8b",
+      "database_id": "00000000-0000-0000-0000-000000000000",
       "migrations_dir": "../../drizzle"
     }
   ]

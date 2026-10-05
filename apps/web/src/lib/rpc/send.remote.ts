@@ -9,6 +9,8 @@ import { sendGrantUserIds } from "@doota/mail-core/mailbox";
 import { enqueueSend, cancelSend, type OutboundEnv } from "@doota/mail-core/outbound";
 import { deliverInBackground } from "$lib/server/mail/deliver-bridge.js";
 import { resolveSender } from "@doota/mail-core/resolver";
+import { resolveSendAttachments } from "$lib/server/send-attachments.js";
+import { readableMessageReference } from "@doota/mail-core/message-access";
 
 /**
  * Send trigger surfaces (Part I). App-session sends go through these remote
@@ -66,8 +68,11 @@ export const sendMessage = command(SendInput, async (input) => {
   }
 
   const sender = await resolveSender(locals.db, locals.user.id, input.mailboxId, input.fromAliasId);
+  if (input.parentMessageId) await readableMessageReference(locals.db, { userId: locals.user.id }, sender.orgId, input.parentMessageId);
+  const env = outboundEnv();
+  const attachments = await resolveSendAttachments(locals.db, env, locals.user.id, sender.orgId, input.attachments.map((a) => a.r2Key));
 
-  const res = await enqueueSend(locals.db, outboundEnv(), {
+  const res = await enqueueSend(locals.db, env, {
     orgId: sender.orgId,
     mailboxId: input.mailboxId,
     createdByUserId: locals.user.id,
@@ -81,7 +86,7 @@ export const sendMessage = command(SendInput, async (input) => {
     text: input.text ?? null,
     html: input.html ?? null,
     parentMessageId: input.parentMessageId ?? null,
-    attachments: input.attachments,
+    attachments,
     sendAt: input.sendAt ?? null,
     idempotencyKey: input.idempotencyKey ?? crypto.randomUUID(),
     undoSeconds: input.undoSeconds ?? undefined,

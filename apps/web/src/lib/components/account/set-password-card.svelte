@@ -21,13 +21,13 @@
 			<LockIcon class="size-4" /> Set your password
 		</Card.CardTitle>
 		<Card.CardDescription>
-			Replace the temporary password you were given with one only you know.
+			Choose a password only you know. Newly invited accounts set it through the link in their external recovery inbox.
 		</Card.CardDescription>
 	</Card.CardHeader>
 	<Card.CardContent>
 		<form {...changeInitialPassword} class="flex flex-col gap-3">
 			<Field.Field>
-				<Field.Label>Current (temporary) password</Field.Label>
+				<Field.Label>Current password</Field.Label>
 				<Input
 					{...changeInitialPassword.fields.currentPassword.as('password')}
 					type="password"

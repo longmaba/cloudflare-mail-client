@@ -36,7 +36,7 @@ type SessionUser = {
   twoFactorEnabled?: boolean | null;
 };
 
-/** Elevated accounts must hold both factors (TOTP + passkey). */
+/** Elevated accounts require authenticator two-factor authentication. */
 export function isElevatedRole(role?: string | null): boolean {
   return role === "admin" || role === "superadmin";
 }
@@ -113,10 +113,10 @@ const DONE: OnboardingStatus = { steps: [], complete: true, nextStep: null };
 
 /**
  * Derives what onboarding is left for a user. Requirements differ by role:
- *   superadmin → verify primary email + secure account (2FA/passkey)
+ *   superadmin → activate mail domain + verify recovery + secure account (TOTP)
  *   admin      → verify recovery email + secure account
  *   member     → verify recovery email
- * Anyone provisioned with a temp password also has a set-password step.
+ * Invited users finish password setup through their recovery link before login.
  *
  * Reads the gating flags fresh from D1 (never the 5-minute session cookie cache),
  * so a just-completed step isn't reported stale and bounce the user in a loop.
@@ -129,43 +129,31 @@ export async function getOnboardingStatus(
    * enroll TOTP too, so reopen secure-account for them like an elevated debt. */
   mustEnroll2fa = false,
 ): Promise<OnboardingStatus> {
-  // Onboarded users normally skip re-derivation, except an account owing a
-  // security factor: elevated (2FA+passkey) or org-mandated 2FA reopens it.
+  // Reopen onboarding when elevated or org-mandated TOTP is disabled.
   const mustSecure = hasSecurityDebt(user) || mustEnroll2fa;
   if (user.onboardedAt && !mustSecure) return DONE;
 
   const role = user.role ?? "member";
   const isElevated = isElevatedRole(role);
 
-  const [fresh, passkeys] = await Promise.all([
-    db.query.user.findFirst({
-      where: eq(schema.user.id, user.id),
-      columns: {
-        emailVerified: true,
-        twoFactorEnabled: true,
-        recoveryEmail: true,
-        recoveryEmailVerified: true,
-        mustChangePassword: true,
-      },
-    }),
-    db.$count(schema.passkey, eq(schema.passkey.userId, user.id)),
-  ]);
+  const fresh = await db.query.user.findFirst({
+    where: eq(schema.user.id, user.id),
+    columns: {
+      twoFactorEnabled: true,
+      recoveryEmail: true,
+      recoveryEmailVerified: true,
+      mustChangePassword: true,
+    },
+  });
 
-  // Both factors are mandatory for elevated roles. Passkey-only isn't enough:
-  // password sign-in never consults passkeys, so an admin with a passkey but no
-  // TOTP could be logged in with bare credentials — that exact hole shipped once.
-  // An org-2FA member owes only TOTP (the mandate is "require 2FA", not a passkey).
-  const secured = !!fresh?.twoFactorEnabled && (isElevated ? passkeys > 0 : true);
+  // Passkeys are optional; they do not replace the administrator TOTP mandate.
+  const secured = !!fresh?.twoFactorEnabled;
   const steps: OnboardingStep[] = [];
 
-  // The super-admin onboards the first mail domain here: at genesis no domain is
-  // configured, so there is no sending path for any mail (the bootstrap paradox).
-  // "Done" the moment a domain exists — a pending zone (nameservers not yet
-  // delegated) still counts, so they can continue and finish DNS later rather
-  // than being walled out of /admin while nameservers propagate. Once that domain
-  // flips active, wireAndActivate auto-sends their email-verification mail.
+  // Genesis initializes a pending domain. Activate it during onboarding so
+  // external recovery verification has a working sending path.
   if (role === "superadmin") {
-    const domains = await db.$count(schema.organization);
+    const domains = await db.$count(schema.organization, eq(schema.organization.status, "active"));
     steps.push({
       id: "onboard-domain",
       title: "Onboard a mail domain",
@@ -175,25 +163,19 @@ export async function getOnboardingStatus(
     });
   }
 
-  // The external super-admin doesn't verify email at onboarding: their email
-  // verification is auto-sent once a domain is active (see above), and is a
-  // non-blocking, deferred action. Their trust root is deploy access, and 2FA /
-  // passkey below is the real gate, so the super-admin never has a verify step.
-  if (role !== "superadmin") {
-    steps.push({
-      id: "verify-recovery",
-      title: "Verify a recovery email",
-      description:
-        "An external address to reset your password — your Doota inbox can't receive reset links.",
-      done: !!fresh?.recoveryEmail && !!fresh?.recoveryEmailVerified,
-    });
-  }
+  // Every role verifies its external recovery inbox.
+  steps.push({
+    id: "verify-recovery",
+    title: "Verify a recovery email",
+    description: "An external inbox for password reset links.",
+    done: !!fresh?.recoveryEmail && !!fresh?.recoveryEmailVerified,
+  });
 
   if (fresh?.mustChangePassword) {
     steps.push({
       id: "set-password",
       title: "Set your password",
-      description: "Replace the temporary password you were given.",
+      description: "Choose your own password using the setup link sent to your recovery inbox.",
       done: false,
     });
   }
@@ -203,7 +185,7 @@ export async function getOnboardingStatus(
       id: "secure-account",
       title: "Secure your account",
       description: isElevated
-        ? "Admin accounts require both two-factor authentication and a passkey."
+        ? "Admin accounts require authenticator two-factor authentication. Passkeys are optional."
         : "Your organization requires two-factor authentication.",
       done: secured,
     });

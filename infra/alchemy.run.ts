@@ -29,7 +29,7 @@ import { hexToBase64, stateSecret, VapidKeyPair, VapidKeyPairProvider } from "./
  *     at the root does both).
  */
 export default Alchemy.Stack(
-  "Doota Mail",
+  process.env.INSTANCE_SLUG ? `Doota Mail ${process.env.INSTANCE_SLUG}` : "Doota Mail",
   {
     providers: Layer.mergeAll(Cloudflare.providers(), VapidKeyPairProvider()),
     state: Cloudflare.state(),
@@ -40,13 +40,16 @@ export default Alchemy.Stack(
     // [a-z0-9-], so sanitize the stage (default `dev_<username>` contains an
     // underscore).
     const stage = yield* Alchemy.Stage;
+    if (process.env.INSTANCE_STAGE && stage !== process.env.INSTANCE_STAGE) {
+      throw new Error("Deployment stage differs from the saved instance. Use pnpm run setup/upgrade.");
+    }
     if (stage === "production") {
       // Retired: this stage's state claims the manually-managed bare-name
       // workers (from an early bare-name deploy); reusing it would rename
       // them to suffixed names and delete the bare originals. Use `prod`.
       throw new Error('Stage "production" is retired — deploy --stage prod instead (see alchemy.run.ts header).');
     }
-    const stageSuffix = stage.toLowerCase().replace(/[^a-z0-9-]/g, "-");
+    const stageSuffix = [process.env.INSTANCE_SLUG, stage.toLowerCase().replace(/[^a-z0-9-]/g, "-")].filter(Boolean).join("-");
     const named = (baseName: string) => `${baseName}-${stageSuffix}`;
 
     // ── Shared resources (fresh per stage, not the bare manual names) ──
@@ -57,6 +60,7 @@ export default Alchemy.Stack(
     const authKv = yield* Cloudflare.KV.Namespace("AuthKv", { title: named("AUTH_KV") });
     const mailRawBucket = yield* Cloudflare.R2.Bucket("MailRaw", { name: named("doota-mail-raw") });
     const inboundQueue = yield* Cloudflare.Queues.Queue("MailInbound", { name: named("doota-mail-inbound") });
+    const inboundDlq = yield* Cloudflare.Queues.Queue("MailInboundDlq", { name: named("doota-mail-inbound-dlq") });
     const outboundQueue = yield* Cloudflare.Queues.Queue("MailOutbound", { name: named("doota-mail-outbound") });
     const mailEventsQueue = yield* Cloudflare.Queues.Queue("MailEvents", { name: named("doota-mail-events") });
     const webhookQueue = yield* Cloudflare.Queues.Queue("Webhooks", { name: named("doota-webhooks") });
@@ -81,6 +85,17 @@ export default Alchemy.Stack(
       MAIL_DEK: mailDek,
       MAIL_SEARCH_KEY: mailSearchKey,
     };
+    // Tags also appear on Alchemy's pre-created stubs, so an interrupted first
+    // deployment can be resumed without adopting another instance's Worker.
+    const identityTags = process.env.INSTANCE_ID && process.env.MAIL_KEY_FINGERPRINT
+      ? { tags: [`mail-instance:${process.env.INSTANCE_ID}`, `mail-keys:${process.env.MAIL_KEY_FINGERPRINT}`] }
+      : {};
+    const instanceVars = {
+      ...optionalVar("INSTANCE_ID"),
+      ...optionalVar("INSTANCE_SLUG"),
+      ...optionalVar("INSTANCE_STAGE"),
+      ...optionalVar("MAIL_KEY_FINGERPRINT"),
+    };
     const webPushKeys = {
       VAPID_PUBLIC_KEY: process.env.VAPID_PUBLIC_KEY ?? mintedVapid.publicKey,
       VAPID_PRIVATE_KEY: process.env.VAPID_PRIVATE_KEY
@@ -92,6 +107,7 @@ export default Alchemy.Stack(
     // Deployed first, since the other two bind its DO cross-script.
     const mailJobsWorker = yield* Cloudflare.Worker("MailJobs", {
       name: named("doota-mail-jobs"),
+      ...identityTags,
       main: "../apps/mail-jobs/src/index.ts",
       compatibility,
       observability: workerObservability,
@@ -100,11 +116,13 @@ export default Alchemy.Stack(
         DB: database,
         MAIL_RAW: mailRawBucket,
         MAIL_OUT_QUEUE: outboundQueue,
+        MAIL_QUEUE: inboundQueue,
         // Webhook delivery: mail-jobs both produces (submission state changes in
         // the outbound consumer) and consumes (the delivery jobs below).
         WEBHOOK_QUEUE: webhookQueue,
         MAIL_EVENTS: Cloudflare.DurableObject("MailEventsHub", { className: "MailEventHub" }),
         EMAIL_SENDER: Cloudflare.Email.SendEmail("EmailSender"),
+        ...instanceVars,
         ...sharedMailSecrets,
         ...webPushKeys,
         ...optionalVar("LOG_LEVEL"),
@@ -130,6 +148,7 @@ export default Alchemy.Stack(
     // Name is load-bearing: the routing rule (domains.remote.ts) points at it.
     const mailInWorker = yield* Cloudflare.Worker("MailIn", {
       name: named("doota-mail-inbound"),
+      ...identityTags,
       main: "../apps/mail-in/src/index.ts",
       compatibility,
       observability: workerObservability,
@@ -148,6 +167,7 @@ export default Alchemy.Stack(
           className: "MailEventHub",
           scriptName: mailJobsWorker.workerName,
         }),
+        ...instanceVars,
         ...sharedMailSecrets,
         ...webPushKeys,
         ...optionalVar("LOG_LEVEL"),
@@ -156,6 +176,7 @@ export default Alchemy.Stack(
     yield* Cloudflare.Queues.Consumer("InboundConsumer", {
       queueId: inboundQueue.queueId,
       scriptName: mailInWorker.workerName,
+      deadLetterQueue: inboundDlq.queueName,
       settings: { batchSize: 10, maxRetries: 5 },
     });
 
@@ -164,6 +185,7 @@ export default Alchemy.Stack(
     // the assets directory's .assetsignore keeps _worker.js out of the assets.
     const webWorker = yield* Cloudflare.Worker("Web", {
       name: named("doota"),
+      ...identityTags,
       main: "../apps/web/.svelte-kit/cloudflare/_worker.js",
       assets: "../apps/web/.svelte-kit/cloudflare",
       // `alchemy dev` runs the mail workers locally, but web dev is vite
@@ -205,6 +227,12 @@ export default Alchemy.Stack(
         // host.
         ORIGINS: originsValue ?? Cloudflare.Worker.URL,
         MAIL_IN_WORKER_NAME: mailInWorker.workerName,
+        ...instanceVars,
+        ...optionalVar("APP_NAME"),
+        ...optionalVar("MAIL_DOMAIN"),
+        ...optionalVar("MAIL_ROUTING_MODE"),
+        ...optionalVar("MAIL_ZONE_ID"),
+        ...optionalVar("MAIL_ZONE_NAME"),
         BETTER_AUTH_SECRET: betterAuthSecret,
         ...sharedMailSecrets,
         ...webPushKeys,

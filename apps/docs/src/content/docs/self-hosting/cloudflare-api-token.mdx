@@ -5,17 +5,30 @@ sidebar:
   order: 2
 ---
 
+<Aside type="caution" title="Upstream reference: use the guided installer">
+
+This page retains upstream Doota implementation details and historical commands.
+For this fork, follow the [current guided setup](https://github.com/longmaba/cloudflare-mail-client#install) using Node 24, pnpm 10
+and `pnpm run setup`; use `pnpm run doctor` for read-only diagnostics and
+`pnpm run upgrade` for published releases. Native sending requires Workers Paid.
+The installer preserves the selected account, domain, resource names and keys.
+Older direct-deploy and automatic-deploy instructions below are historical reference,
+not the installation path for a saved instance. See [current operations](https://github.com/longmaba/cloudflare-mail-client/blob/main/docs/OPERATIONS.md)
+and the [staged pilot guide](https://github.com/longmaba/cloudflare-mail-client/blob/main/docs/KIENG-PILOT.md).
+
+</Aside>
+
 Doota involves two **different** Cloudflare tokens with different jobs. Don't
 reuse one for the other:
 
 | Token | Who uses it | When |
 | --- | --- | --- |
-| **Deploy token** (`CLOUDFLARE_API_TOKEN`) | Alchemy / CI | Deploy time only — creates and updates Workers, database, storage, queues. Scopes are listed in [Deploy](/self-hosting/deploy#b-auto-deploy-from-github). Local deploys don't need it at all (browser sign-in). |
+| **Deploy token** (`CLOUDFLARE_API_TOKEN`) | Alchemy / CI | Deploy time only — creates and updates Workers, database, storage, queues. Scopes are listed in [Deploy](/self-hosting/deploy#b-archived-upstream-automatic-deployment). Local deploys don't need it at all (browser sign-in). |
 | **App runtime token** (`APP_CLOUDFLARE_API_TOKEN`) | The running web app | When an org onboards a mail domain. **This page is about this token.** |
 
-The running app calls the Cloudflare API to onboard domains: create (or reuse)
-the zone, enable Email Routing, write MX / SPF / DKIM / DMARC records, and
-point the catch-all rule at the mail-in Worker. This is the **only** place the
+This fork uses the selected existing zone and configured mail domain. The
+runtime token reads zone state and configures scoped MX/SPF/DKIM/DMARC and
+literal recipient rules; apex catch-all changes require deliberate cutover. This is the **only** place the
 app touches the CF API — never on the inbound hot path or during login.
 
 <Aside type="danger" title="Never use the Global API Key">
@@ -36,29 +49,30 @@ app touches the CF API — never on the inbound hot path or during login.
     account (or specific zones) that will host Doota domains.
   </Step>
   <Step title="Store it as a secret">
-    Copy the token once — it's shown only at creation — and set it as
-    `APP_CLOUDFLARE_API_TOKEN` in your deploy environment (`infra/.env`
-    locally, a repository secret in CI), then redeploy — the deploy binds it
+    Copy the token once — it's shown only at creation — and enter it at
+    the masked runtime-token prompt in `pnpm run setup`. The installer saves
+    it in private `.local/secrets.json` and reuses it — the deploy binds it
     to the web Worker. Never commit it.
   </Step>
 </Steps>
 
 ## Required permissions
 
+Restrict the runtime token to the selected existing zone. It is separate from
+the account-scoped deployment token. Match Cloudflare's current permission
+labels to the [current credential table](https://github.com/longmaba/cloudflare-mail-client#credentials-and-activation).
+
 | Permission | Scope | Why |
 | --- | --- | --- |
-| **Zone → Zone → Edit** | Account | Read zone status; needed to wire records. |
-| **Zone → DNS → Edit** | Account | Write MX, SPF, DKIM, DMARC, return-path records. |
-| **Zone → Email Routing Rules → Edit** | Account | Enable routing and set the catch-all rule. |
-| **Account → Email Routing Addresses → Edit** | Account | Manage routing destinations. |
-| **Zone → Zone → Create** | Account | Only if Doota should add **brand-new** domains not already on your account. |
+| Zone Read | Selected zone | Read zone status |
+| DNS Edit | Selected zone | Configure scoped routing and sending DNS |
+| Email Routing Rules/Settings Edit | Selected zone | Configure literal recipient rules; apex changes only after deliberate cutover |
+| Email Sending Edit | Selected zone | Onboard the exact sending domain |
+| Account Read / Email Sending Read | Selected account where required | Read account sending diagnostics |
 
-<Aside type="tip" title="You can drop Zone:Create">
-  If you only ever onboard domains that are **already zones on your Cloudflare
-  account**, omit **Zone:Create** entirely. Doota detects the existing zone and
-  reuses it — no creation call is made. Grant Zone:Create only if you want Doota
-  to add new domains for you.
-</Aside>
+The guided installer does not require all-zone runtime scope or new-zone
+creation permission. Run `pnpm run doctor` to diagnose missing read scopes;
+write permissions are exercised only by deliberate onboarding.
 
 ## The account ID
 

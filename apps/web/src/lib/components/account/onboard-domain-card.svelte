@@ -12,9 +12,8 @@
 			<GlobeIcon class="size-4" /> Onboard a mail domain
 		</Card.CardTitle>
 		<Card.CardDescription>
-			Connect a Cloudflare domain so Doota can send and receive mail. An active zone wires
-			immediately; a new zone returns nameservers to delegate — you can continue once it's added
-			and finish DNS later.
+			Activate the mail domain selected during setup. Pilot installs create subdomain DNS
+			and exact recipient rules while keeping the existing apex mail provider.
 		</Card.CardDescription>
 	</Card.CardHeader>
 	<Card.CardContent>

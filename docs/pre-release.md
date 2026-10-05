@@ -1,5 +1,16 @@
 # Pre-release / deploy runbook (operator)
 
+> **Upstream reference: use the guided installer.**
+>
+> This page retains upstream Doota implementation details and historical commands.
+> For this fork, follow the [current guided setup](https://github.com/longmaba/cloudflare-mail-client#install) using Node 24, pnpm 10
+> and `pnpm run setup`; use `pnpm run doctor` for read-only diagnostics and
+> `pnpm run upgrade` for published releases. Native sending requires Workers Paid.
+> The installer preserves the selected account, domain, resource names and keys.
+> Older direct-deploy and automatic-deploy instructions below are historical reference,
+> not the installation path for a saved instance. See [current operations](https://github.com/longmaba/cloudflare-mail-client/blob/main/docs/OPERATIONS.md)
+> and the [staged pilot guide](https://github.com/longmaba/cloudflare-mail-client/blob/main/docs/KIENG-PILOT.md).
+
 Operator track — the checklist to run **before** the first real-user release and
 on every subsequent production deploy. The Cloudflare-Workers monorepo:
 `apps/web`, `apps/mail-in`, `apps/mail-jobs` (deployed Workers), plus
@@ -73,7 +84,7 @@ Worker env that needs them.
 | --- | --- | --- |
 | `ORIGIN` | yes | App base URL. **Must match the dev/served port** or `/api/auth/*` 404s. |
 | `VAPID_PUBLIC_KEY` | yes | Web-push app-server key (client subscribes with it); also on mail-in/mail-jobs. Safe to expose. |
-| `SETUP_TOKEN` | no | One-time gate for `/setup` genesis wizard. Unset → web wizard disabled (use the CLI). |
+| `SETUP_TOKEN` | no | Installer-generated one-use gate for protected `/setup`. If absent, bootstrap is disabled; CLI recovery cannot create the first user. |
 | `APP_CLOUDFLARE_ACCOUNT_ID` | no | CF account id for domain onboarding. |
 | `MAIL_IN_WORKER_NAME` | no | Deployed mail-in Worker name the Email Routing catch-all targets (`domains.remote.ts`). |
 | `CRON_SECRET` | no | Bearer secret for `POST /api/cron` (HTTP-triggered sweep). |
@@ -155,7 +166,13 @@ wrangler queues create doota-mail-events
 
 ---
 
-## 1. Every-deploy sequence
+## 1. Archived upstream every-deploy sequence
+
+For this fork, use `pnpm run setup` for initial deployment and
+`pnpm run upgrade` for a published release. The installer applies pending
+migrations and preserves saved names/keys; doctor remains read-only. The
+manual resource creation, direct Wrangler deployment, migration cutoff and
+release assumptions below belong to the historical upstream runbook.
 
 Run in order.
 
@@ -256,8 +273,9 @@ pnpm dev                  # web dev server on :5173 (Vite + wrangler platformPro
 - **`ORIGIN` must match the dev port** (Better Auth gates `/api/auth/*` on it).
   For another port, drop a temporary `.env.local` and delete it after (see
   `auth/testing-and-cleanup.md`).
-- Genesis for local testing: `pnpm reset-admin <external-email> <password>`
-  (email-free; enrolls TOTP, prints `otpauth://` + backup codes).
+- First-admin local testing uses the protected `/setup` wizard with a
+  configured `MAIL_DOMAIN`, a domain administrator address and external
+  recovery inbox. `reset-admin` can only reset an existing superadmin.
 - Mail Workers: `pnpm dev:mail-in` / `pnpm dev:mail-jobs`. Inspect D1:
   `pnpm wrangler d1 execute doota --local --command "…"`. Studio:
   `pnpm --filter doota db:studio`.

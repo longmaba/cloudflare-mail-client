@@ -269,7 +269,7 @@
 	<Sidebar.Header class="gap-2">
 		<div class="flex items-center gap-2 px-2 pt-1">
 			<Logo size={26} />
-			<span class="font-heading text-lg font-semibold tracking-tight group-data-[collapsible=icon]:hidden">Doota</span>
+			<span class="font-heading text-lg font-semibold tracking-tight group-data-[collapsible=icon]:hidden">{page.data.appName ?? 'Domain Mail'}</span>
 		</div>
 		<Sidebar.Menu class="group-data-[collapsible=icon]:hidden">
 			<Sidebar.MenuItem>
@@ -517,7 +517,7 @@
 						onclick={() =>
 							pwa.canInstall
 								? void installApp()
-								: toast.info('Install Doota', {
+								: toast.info(`Install ${page.data.appName ?? 'Domain Mail'}`, {
 										description:
 											pwa.hint === 'dock'
 												? 'In Safari, open the Share menu → “Add to Dock”.'

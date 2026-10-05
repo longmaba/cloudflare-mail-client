@@ -11,25 +11,24 @@ import { invalidateRemoteContentPolicy } from "$lib/server/mail-cache.js";
 import {
   mirrorSubaddressing,
   mirrorRoutingSubdomains,
-  currentRoutingSubdomains,
   mirrorReturnPathDomain,
 } from "@doota/mail-core/mirror";
-import { MAIL_IN_WORKER_NAME } from "$app/env/private";
+import { MAIL_IN_WORKER_NAME, MAIL_DOMAIN, MAIL_ROUTING_MODE } from "$app/env/private";
+import { syncDomainRecipients } from '$lib/server/mail-routing.js';
+import { sendRecoveryEmailVerification } from '$lib/server/recovery-email.js';
+import { senderAddress } from '@doota/db/org-domains';
 import { syncRoutingIssue } from "@doota/mail-core/notify";
 import {
-  addRoutingSubdomain,
-  createRoutingRule,
-  findZone,
+  findMailZone,
   getRoutingConfig,
   listZoneDnsRecords,
   inspectZoneMail,
   listZones,
   pollZoneStatus,
-  removeRoutingSubdomain,
   setSubaddressing,
   upsertTxtRecord,
   wireMail,
-  zoneCreate,
+  MailSetupError,
   type ZoneOnboardStatus,
 } from "$lib/server/cloudflare.js";
 
@@ -90,19 +89,21 @@ async function upsertOrg(
 async function wireAndActivate(
   domain: string,
   zoneId: string,
-  sendingSubdomain?: string,
 ): Promise<string> {
   if (!MAIL_IN_WORKER_NAME) {
     error(500, "MAIL_IN_WORKER_NAME is not configured; cannot wire the catch-all route.");
   }
   let sending: { returnPathDomain?: string } = {};
   try {
-    sending = await wireMail(zoneId, MAIL_IN_WORKER_NAME, sendingSubdomain);
+    sending = await wireMail(zoneId, MAIL_IN_WORKER_NAME, domain);
   } catch (e) {
+    if (e instanceof MailSetupError) error(400, e.message);
     console.error("[domains:wire] failed", e);
     error(502, "Cloudflare wiring failed. Check the API token scopes and try again.");
   }
-  const orgId = await upsertOrg(domain, "active", zoneId);
+  const orgId = await upsertOrg(domain, "wiring", zoneId);
+  await syncDomainRecipients(getRequestEvent().locals.db, orgId, zoneId, domain);
+  await setOrgLifecycle(orgId, 'active', zoneId);
   // Mirror the bounce/return-path subdomain to D1 (outbound envelope + inbound
   // DSN recognition read it off the hot path). Best-effort — CF stays truth.
   if (sending.returnPathDomain) {
@@ -124,15 +125,11 @@ async function wireAndActivate(
  * call (e.g. activating a second domain) is harmless.
  */
 async function autoSendSuperadminVerify() {
-  const { locals, request } = getRequestEvent();
+  const { locals } = getRequestEvent();
   const user = locals.user;
-  if (user?.role !== "superadmin" || user.emailVerified) return;
-  await tryCatch(
-    locals.auth.api.sendVerificationEmail({
-      body: { email: user.email, callbackURL: "/onboarding?verified=1" },
-      headers: request.headers,
-    }),
-  );
+  if (user?.role !== 'superadmin' || !user.recoveryEmail || user.recoveryEmailVerified) return;
+  const from = await senderAddress(locals.db, MAIL_DOMAIN);
+  await tryCatch(sendRecoveryEmailVerification(user.id, user.recoveryEmail, from));
 }
 
 /**
@@ -141,160 +138,56 @@ async function autoSendSuperadminVerify() {
  * we surface the assigned nameservers and persist a pending org (the zone exists
  * on CF, so we must track it to poll later).
  */
+function configuredDomain(raw: string) {
+  const domain = raw.trim().toLowerCase();
+  if (!MAIL_DOMAIN || domain !== MAIL_DOMAIN) error(400, 'Use the domain selected by the installer.');
+  return domain;
+}
+
 export const onboardDomain = command(
-  z.object({
-    domain: z.string().min(3),
-    // Optional outbound DKIM host (e.g. send.acme.com); must sit within the domain.
-    sendingSubdomain: z.string().optional(),
-  }),
-  async ({ domain: raw, sendingSubdomain: subRaw }) => {
+  z.object({ domain: z.string().min(3), sendingSubdomain: z.string().optional() }),
+  async ({ domain: raw }) => {
     requireSuperadmin();
-    const domain = raw.trim().toLowerCase();
-    if (!DOMAIN_RE.test(domain)) {
-      return { success: false as const, message: "Enter a valid domain, e.g. acme.com." };
+    const domain = configuredDomain(raw);
+    const zone = await findMailZone(domain);
+    if (!zone) error(400, 'Add the parent domain to the selected Cloudflare account first, then run doctor.');
+    if (zone.status !== 'active') {
+      const orgId = await upsertOrg(domain, zone.status, zone.id);
+      return { success: true as const, orgId, status: zone.status, nameServers: zone.nameServers };
     }
-    const sendingSubdomain = subRaw?.trim().toLowerCase() || undefined;
-    if (sendingSubdomain && !sendingSubdomain.endsWith(`.${domain}`)) {
-      return {
-        success: false as const,
-        message: `The sending subdomain must be within ${domain}, e.g. send.${domain}.`,
-      };
-    }
-
-    // CF first: the org row is only written after Cloudflare succeeds.
-    let zone;
-    try {
-      zone = await zoneCreate(domain);
-    } catch (e) {
-      console.error("[domains:zone] failed", e);
-      return {
-        success: false as const,
-        message: "Cloudflare rejected the zone request. Check the API token and account.",
-      };
-    }
-
-    if (zone.status === "active") {
-      const orgId = await wireAndActivate(domain, zone.id, sendingSubdomain);
-      return { success: true as const, orgId, status: "active" as ZoneOnboardStatus, nameServers: [] };
-    }
-
-    // Zone created but not active yet: persist a pending org to poll later.
-    const orgId = await upsertOrg(domain, zone.status, zone.id);
-    return {
-      success: true as const,
-      orgId,
-      status: zone.status,
-      nameServers: zone.nameServers,
-    };
+    const orgId = await wireAndActivate(domain, zone.id);
+    return { success: true as const, orgId, status: 'active' as ZoneOnboardStatus, nameServers: [] };
   },
 );
 
-/**
- * Link a domain already onboarded on the Cloudflare dashboard: no CF writes,
- * just verify Email Routing is ready and sync it into our DB as active. For a
- * zone the operator configured themselves.
- */
+// Both entry points enforce the same scoped routing and sending checks.
 export const linkDomain = command(z.string(), async (raw) => {
   requireSuperadmin();
-  const domain = raw.trim().toLowerCase();
-  if (!DOMAIN_RE.test(domain)) {
-    return { success: false as const, message: "Enter a valid domain." };
-  }
-
-  const zone = await findZone(domain);
-  if (!zone) {
-    return { success: false as const, message: `${domain} is not a zone on your Cloudflare account.` };
-  }
-  if (zone.status !== "active") {
-    return { success: false as const, message: `${domain}'s zone isn't active yet — onboard it instead.` };
-  }
-  const mail = await inspectZoneMail(zone.id);
-  if (!mail.routingReady) {
-    return {
-      success: false as const,
-      message: `Email Routing isn't configured for ${domain} on Cloudflare. Use Onboard instead.`,
-    };
-  }
-
-  const orgId = await upsertOrg(domain, "active", zone.id);
-  return { success: true as const, orgId, status: "active" as ZoneOnboardStatus };
+  const domain = configuredDomain(raw);
+  const zone = await findMailZone(domain);
+  if (!zone || zone.status !== 'active') error(400, 'The selected Cloudflare zone must be active.');
+  const orgId = await wireAndActivate(domain, zone.id);
+  return { success: true as const, orgId, status: 'active' as ZoneOnboardStatus };
 });
 
-/**
- * Re-check a pending zone (superadmin poll). When it flips to active, wire mail
- * and mark active. Never called on the hot path — only from the admin screen.
- */
 export const refreshDomain = command(z.string(), async (orgId) => {
   requireSuperadmin();
   const { locals } = getRequestEvent();
-  const org = await locals.db.query.organization.findFirst({
-    where: eq(schema.organization.id, orgId),
-    columns: { id: true, domain: true, zoneId: true, status: true },
-  });
-  if (!org) error(404, "Organization not found");
-  if (!org.zoneId) error(400, "No Cloudflare zone for this domain yet.");
-
-  const zone = await pollZoneStatus(org.zoneId);
-
-  if (zone.status === "active" && org.status !== "active") {
-    await wireAndActivate(org.domain, org.zoneId);
-    return { status: "active" as ZoneOnboardStatus, nameServers: [] };
-  }
-
-  if (zone.status === "active" && org.status === "active" && MAIL_IN_WORKER_NAME) {
-    // Self-heal an already-active org whose catch-all never attached (domain
-    // onboarded before the mail-in Worker existed) or was detached on the
-    // dashboard. createRoutingRule is an idempotent upsert.
-    const mail = await inspectZoneMail(org.zoneId);
-    if (!mail.catchAllToWorker(MAIL_IN_WORKER_NAME)) {
-      await createRoutingRule(org.zoneId, MAIL_IN_WORKER_NAME);
-      // Just fixed it: resolve any outstanding superadmin routing_issue bells.
-      await syncRoutingIssue(locals.db, org.id, true).catch(() => {});
-    }
-  }
-
-  await setOrgLifecycle(org.id, zone.status);
+  const org = await locals.db.query.organization.findFirst({ where: eq(schema.organization.id, orgId) });
+  if (!org) error(404, 'Organization not found');
+  configuredDomain(org.domain);
+  const zone = org.zoneId ? await pollZoneStatus(org.zoneId) : await findMailZone(org.domain);
+  if (!zone) error(400, 'The selected zone was not found. Run doctor.');
+  if (zone.status === 'active') await wireAndActivate(org.domain, zone.id);
+  else await setOrgLifecycle(org.id, zone.status, zone.id);
   return { status: zone.status, nameServers: zone.nameServers };
 });
 
-/**
- * Zones on the operator's Cloudflare account, each flagged with whether it's
- * already onboarded in Doota. Drives the "pick a domain" picker so the operator
- * doesn't type it by hand. Fetched live — never persisted.
- */
 export const listCloudflareZones = command(async () => {
   requireSuperadmin();
-  const { locals } = getRequestEvent();
-  const [zones, orgs] = await Promise.all([
-    listZones(),
-    locals.db
-      .select({ domain: schema.organization.domain })
-      .from(schema.organization),
-  ]);
-  const onboarded = new Set(orgs.map((org) => org.domain));
-
-  // For zones not yet in our DB, check whether Email Routing is already set up on
-  // Cloudflare — if so we offer "Link" (DB-only sync); otherwise "Onboard".
-  return Promise.all(
-    zones.map(async (zone) => {
-      const active = zone.status === "active";
-      let configured = false;
-      if (active && !onboarded.has(zone.name)) {
-        try {
-          configured = (await inspectZoneMail(zone.id)).routingReady;
-        } catch {
-          configured = false;
-        }
-      }
-      return {
-        id: zone.id,
-        name: zone.name,
-        active,
-        onboarded: onboarded.has(zone.name),
-        configured,
-      };
-    }),
-  );
+  if (!MAIL_DOMAIN) error(400, 'MAIL_DOMAIN is missing. Run setup.');
+  const zone = await findMailZone(MAIL_DOMAIN);
+  return zone ? [{ id: zone.id, name: MAIL_DOMAIN, active: zone.status === 'active', onboarded: false, configured: false }] : [];
 });
 
 /**
@@ -488,6 +381,7 @@ async function orgZone(orgId: string) {
     columns: { domain: true, zoneId: true },
   });
   if (!org?.zoneId) error(400, "No Cloudflare zone for this domain yet.");
+  configuredDomain(org.domain);
   return { zoneId: org.zoneId, apex: org.domain };
 }
 
@@ -517,59 +411,36 @@ export const mailRoutingConfig = command(z.string(), async (orgId) => {
   // createRoutingRule tolerates that and leaves it unset). Surface it so the
   // UI can say "refresh to retry" instead of failing silently. null = can't
   // judge (no MAIL_IN_WORKER_NAME configured, e.g. local dev).
-  const catchAllAttached = MAIL_IN_WORKER_NAME
+  const catchAllAttached = MAIL_ROUTING_MODE === 'apex' && MAIL_IN_WORKER_NAME
     ? (await inspectZoneMail(zoneId)).catchAllToWorker(MAIL_IN_WORKER_NAME)
     : null;
   // Reconcile-on-view: refresh the D1 mirror from CF truth so a direct dashboard
   // edit self-heals and the inbound hot path stays accurate.
   const { locals } = getRequestEvent();
-  await mirrorSubaddressing(locals.db, orgId, config.supportSubaddress);
-  await mirrorRoutingSubdomains(locals.db, orgId, config.subdomains);
+  await mirrorSubaddressing(locals.db, orgId, MAIL_ROUTING_MODE === 'apex' && config.supportSubaddress);
+  await mirrorRoutingSubdomains(locals.db, orgId, []);
   // Bell truth rides the same inspection: detached raises a routing_issue
   // notification for every superadmin, attached resolves them. Best-effort:
   // a notification hiccup must not fail the config read.
   if (catchAllAttached !== null) {
     await syncRoutingIssue(locals.db, orgId, catchAllAttached).catch(() => {});
   }
-  return { ...config, catchAllAttached };
+  return { ...config, catchAllAttached, routingMode: MAIL_ROUTING_MODE ?? 'manual' };
 });
 
-/** Add a subdomain to the org's Email Routing. Superadmin only. */
+/** Single-domain v1: mail hosts come exclusively from installer configuration. */
 export const addMailSubdomain = command(
   z.object({ orgId: z.string().min(1), subdomain: z.string().min(1) }),
-  async ({ orgId, subdomain }) => {
-    const { zoneId, apex } = await orgZone(orgId);
-    const host = normalizeSubdomain(subdomain, apex);
-    if (!host) {
-      return { success: false as const, message: `Enter a subdomain within ${apex}, e.g. mail.${apex}.` };
-    }
-    try {
-      await addRoutingSubdomain(zoneId, host);
-    } catch (e) {
-      console.error("[domains:subdomain] add failed", e);
-      return { success: false as const, message: "Cloudflare rejected the subdomain. Check the zone and try again." };
-    }
-    // Write-through: CF accepted it, mirror into D1 for the resolver.
-    const { locals } = getRequestEvent();
-    const next = [...(await currentRoutingSubdomains(locals.db, orgId)), host];
-    await mirrorRoutingSubdomains(locals.db, orgId, next);
-    return { success: true as const, subdomain: host };
+  async ({ orgId }) => {
+    await orgZone(orgId);
+    return { success: false as const, message: 'Additional mail subdomains require a separate instance.' };
   },
 );
-
-/** Remove a routing subdomain from the org's Email Routing. Superadmin only. */
 export const removeMailSubdomain = command(
   z.object({ orgId: z.string().min(1), subdomain: z.string().min(1) }),
-  async ({ orgId, subdomain }) => {
-    const { zoneId, apex } = await orgZone(orgId);
-    const host = normalizeSubdomain(subdomain, apex);
-    if (!host) error(400, "Invalid subdomain.");
-    await removeRoutingSubdomain(zoneId, host);
-    // Write-through: drop it from the D1 mirror too.
-    const { locals } = getRequestEvent();
-    const next = (await currentRoutingSubdomains(locals.db, orgId)).filter((subdomain) => subdomain !== host);
-    await mirrorRoutingSubdomains(locals.db, orgId, next);
-    return { success: true as const };
+  async ({ orgId }) => {
+    await orgZone(orgId);
+    return { success: false as const, message: 'The configured mail domain is managed by setup.' };
   },
 );
 
@@ -578,6 +449,7 @@ export const toggleSubaddressing = command(
   z.object({ orgId: z.string().min(1), on: z.boolean() }),
   async ({ orgId, on }) => {
     const { zoneId } = await orgZone(orgId);
+    if (MAIL_ROUTING_MODE !== 'apex') error(400, 'Plus addressing changes are zone-wide and disabled during pilot installation.');
     try {
       await setSubaddressing(zoneId, on);
     } catch (e) {

@@ -22,7 +22,7 @@
 			<AtSignIcon class="size-4" /> Recovery email
 		</Card.CardTitle>
 		<Card.CardDescription>
-			External address used to reset your password. Your Doota inbox can't receive reset links —
+			External address used to reset your password. Your hosted inbox can't receive reset links —
 			this is the only self-service recovery path.
 		</Card.CardDescription>
 		{#if recoveryEmail}
@@ -58,6 +58,7 @@
 					<InputGroup>
 						<InputGroupInput
 							{...setRecoveryEmail.fields.recoveryEmail.as('email')}
+							value={recoveryEmail ?? ''}
 							type="email"
 							placeholder="you@example.com"
 							required

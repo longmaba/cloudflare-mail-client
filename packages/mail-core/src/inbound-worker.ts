@@ -4,6 +4,7 @@ import * as schema from "@doota/db/schema";
 import { resolveRecipient } from "./resolver";
 import { importKey, putEncryptedBlob } from "./crypto";
 import { log } from "./log";
+import { contentHash, ensureInboundReceipt, failInboundReceipt, markInboundQueued } from "./inbound-receipts";
 
 /**
  * `mail-in` handler — Cloudflare Email Routing catch-all target. Runs merged
@@ -15,7 +16,7 @@ import { log } from "./log";
  *
  * Email Routing invokes this once per recipient when a message hits several of
  * our addresses; that's expected — each invocation contributes its own delivery
- * and downstream dedupes by Message-ID.
+ * and downstream dedupes by raw content and recipient.
  */
 
 export type MailEnv = {
@@ -43,6 +44,8 @@ export type MailEnv = {
 };
 
 export type InboundJob = {
+  /** Stable per-content/per-recipient processing identity; absent on older jobs. */
+  receiptId?: string;
   r2RawKey: string;
   recipient: string;
   orgId: string;
@@ -74,16 +77,6 @@ type EmailMessage = {
   setReject(reason: string): void;
 };
 
-/** Turn a Message-ID header into a filesystem-safe R2 key fragment. */
-function safeKey(id: string): string {
-  return id.replace(/[<>]/g, "").replace(/[^a-zA-Z0-9._@-]/g, "_").slice(0, 200);
-}
-
-async function sha256Hex(buf: ArrayBuffer): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", buf);
-  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-
 export async function handleEmail(
   message: EmailMessage,
   env: MailEnv,
@@ -97,8 +90,8 @@ export async function handleEmail(
     return;
   }
 
-  // Buffer the raw once so we can both key it (content hash when Message-ID is
-  // absent) and store it. Inbound emails are small; buffering keeps the key
+  // Buffer the raw once so we can both content-hash and store it. Email Routing
+  // bounds inbound size; buffering keeps the key
   // stable for idempotent R2 writes.
   const rawBuf = await new Response(message.raw).arrayBuffer();
   const messageIdHeader = message.headers.get("message-id");
@@ -114,7 +107,9 @@ export async function handleEmail(
     spamStatus: message.headers.get("x-spam-status"),
     spf: message.headers.get("received-spf"),
   });
-  const keyId = messageIdHeader ? safeKey(messageIdHeader) : await sha256Hex(rawBuf);
+  // Message-ID is untrusted: distinct messages with the same (or sanitized)
+  // header must never replace each other's canonical encrypted raw bytes.
+  const keyId = await contentHash(rawBuf);
   const r2RawKey = `raw/${resolved.orgId}/${keyId}`;
 
   // Idempotent put: same key overwrites identical bytes; a redelivery is a no-op.
@@ -136,5 +131,15 @@ export async function handleEmail(
     dmarcPass,
     authResults,
   };
-  await env.MAIL_QUEUE.send(job);
+  // Journal before enqueue: a queue failure leaves recoverable encrypted mail.
+  const receiptId = await ensureInboundReceipt(db, job);
+  const receipt = await db.query.inboundReceipt.findFirst({ where: (row, { eq }) => eq(row.id, receiptId), columns: { status: true } });
+  if (receipt?.status === "complete") return;
+  try {
+    await env.MAIL_QUEUE.send(job);
+    await markInboundQueued(db, receiptId);
+  } catch (error) {
+    await failInboundReceipt(db, receiptId, error);
+    throw error;
+  }
 }

@@ -1,169 +1,41 @@
 <script lang="ts">
-	// SPDX-License-Identifier: Apache-2.0
-	import { onMount } from 'svelte';
-	import { toast } from 'svelte-sonner';
-	import { Button } from '$lib/components/ui/button';
-	import { Input } from '$lib/components/ui/input/index.js';
-	import { Spinner } from '$lib/components/ui/spinner/index.js';
-	import StatusChip from '$lib/components/admin/status-chip.svelte';
-	import { onboardDomain, linkDomain, listCloudflareZones } from '$lib/rpc/domains.remote.js';
-	import { errorMessage } from '$lib/utils/error-message';
-
-	// Called after a successful onboard/link so the host can refresh (e.g. invalidateAll).
-	let { onChange }: { onChange?: () => void } = $props();
-
-	type Zone = { id: string; name: string; active: boolean; onboarded: boolean; configured: boolean };
-	let zones = $state<Zone[] | null>(null);
-	let loadingZones = $state(false);
-	let zonesError = $state(false);
-	let busy = $state<string | null>(null);
-	let subFor = $state<string | null>(null);
-	let subValue = $state('');
-	let nameservers = $state<{ domain: string; ns: string[] } | null>(null);
-
-	const available = $derived((zones ?? []).filter((zone) => !zone.onboarded));
-
-	onMount(loadZones);
-
-	async function loadZones() {
-		loadingZones = true;
-		zonesError = false;
-		try {
-			zones = await listCloudflareZones();
-		} catch {
-			zonesError = true;
-			zones = [];
-		} finally {
-			loadingZones = false;
-		}
-	}
-
-	async function onboard(domain: string, sendingSubdomain?: string) {
-		const d = domain.trim().toLowerCase();
-		if (!d) return;
-		busy = d;
-		nameservers = null;
-		// Reject on a logical failure (res.success === false) so the promise toast's
-		// error branch fires — otherwise a rejected-by-payload result reads as success.
-		const req = onboardDomain({ domain: d, sendingSubdomain }).then((res) => {
-			if (!res.success) throw new Error(res.message ?? 'Could not onboard domain.');
-			return res;
-		});
-		toast.promise(req, {
-			loading: `Onboarding ${d}…`,
-			success: (res) =>
-				res.status === 'active'
-					? `${d} is active — mail is wired.`
-					: `${d} added. Delegate the nameservers, then Refresh in its DNS tab.`,
-			error: (err) => (errorMessage(err, 'Onboarding failed.'))
-		});
-		try {
-			const res = await req;
-			if (res.status !== 'active' && res.nameServers?.length) nameservers = { domain: d, ns: res.nameServers };
-			subFor = null;
-			subValue = '';
-			await loadZones();
-			onChange?.();
-		} catch {
-			// Error surfaced by toast.promise.
-		} finally {
-			busy = null;
-		}
-	}
-
-	async function link(domain: string) {
-		busy = domain;
-		const req = linkDomain(domain).then((res) => {
-			if (!res.success) throw new Error(res.message ?? 'Could not link domain.');
-			return res;
-		});
-		toast.promise(req, {
-			loading: `Linking ${domain}…`,
-			success: `${domain} linked — synced from Cloudflare.`,
-			error: (err) => (errorMessage(err, 'Link failed.'))
-		});
-		try {
-			await req;
-			await loadZones();
-			onChange?.();
-		} catch {
-			// Error surfaced by toast.promise.
-		} finally {
-			busy = null;
-		}
-	}
+ // SPDX-License-Identifier: Apache-2.0
+ import { onMount } from 'svelte';
+ import { toast } from 'svelte-sonner';
+ import { Button } from '$lib/components/ui/button';
+ import { Spinner } from '$lib/components/ui/spinner/index.js';
+ import { onboardDomain, listCloudflareZones } from '$lib/rpc/domains.remote.js';
+ import { errorMessage } from '$lib/utils/error-message';
+ let { onChange }: { onChange?: () => void } = $props();
+ let domains = $state<Awaited<ReturnType<typeof listCloudflareZones>>>([]);
+ let loading = $state(true);
+ let failed = $state(false);
+ let busy = $state(false);
+ onMount(load);
+ async function load() {
+  loading = true; failed = false;
+  try { domains = await listCloudflareZones(); } catch { failed = true; }
+  finally { loading = false; }
+ }
+ async function activate(domain: string) {
+  busy = true;
+  try {
+   const result = await onboardDomain({ domain });
+   toast.success(result.status === 'active' ? `${domain} is ready for mail testing.` : 'Activate the parent zone in Cloudflare, then retry.');
+   onChange?.();
+  } catch (cause) { toast.error(errorMessage(cause, 'Could not configure mail. Run doctor and check the token permissions.')); }
+  finally { busy = false; }
+ }
 </script>
-
-<div class="flex flex-col gap-4">
-	<!-- Cloudflare zones -->
-	<div class="space-y-2">
-		{#if loadingZones}
-			<div class="text-muted-foreground flex items-center gap-2 py-3 text-sm">
-				<Spinner /> Loading zones…
-			</div>
-		{:else if zonesError}
-			<p class="text-muted-foreground text-sm">
-				Couldn't reach Cloudflare. Check <code>APP_CLOUDFLARE_ACCOUNT_ID</code> / <code>APP_CLOUDFLARE_API_TOKEN</code>.
-				<Button variant="link" class="px-1" onclick={loadZones}>Retry</Button>
-			</p>
-		{:else if available.length === 0}
-			<p class="text-muted-foreground text-sm">
-				Every zone on the account is already onboarded. Add the domain to your Cloudflare account first, then reload.
-			</p>
-		{:else}
-			{#each available as zone (zone.id)}
-				<div class="flex flex-col gap-2 rounded-lg border p-3">
-					<div class="flex items-center gap-3">
-						<span class="font-mono text-sm font-medium">{zone.name}</span>
-						{#if zone.configured}
-							<StatusChip status="active" />
-							<span class="text-muted-foreground text-xs">Already set up on Cloudflare</span>
-						{:else}
-							<StatusChip status={zone.active ? 'active' : 'pending'} />
-						{/if}
-						<div class="ml-auto flex items-center gap-2">
-							{#if zone.configured}
-								<Button size="sm" disabled={busy === zone.name} onclick={() => link(zone.name)}>
-									{#if busy === zone.name}<Spinner class="mr-1" />{/if}
-									Link
-								</Button>
-							{:else}
-								<Button
-									variant="ghost"
-									size="sm"
-									onclick={() => {
-										subFor = subFor === zone.name ? null : zone.name;
-										subValue = '';
-									}}
-								>
-									Sending subdomain
-								</Button>
-								<Button
-									size="sm"
-									disabled={busy === zone.name}
-									onclick={() => onboard(zone.name, subFor === zone.name ? subValue || undefined : undefined)}
-								>
-									{#if busy === zone.name}<Spinner class="mr-1" />{/if}
-									Onboard
-								</Button>
-							{/if}
-						</div>
-					</div>
-					{#if subFor === zone.name && !zone.configured}
-						<Input class="font-mono" placeholder="send.{zone.name} (optional outbound DKIM host)" bind:value={subValue} />
-					{/if}
-				</div>
-			{/each}
-		{/if}
-	</div>
-
-	{#if nameservers}
-		<div class="bg-muted/40 space-y-1 rounded-lg border p-3">
-			<p class="text-sm font-medium">Delegate {nameservers.domain}</p>
-			<p class="text-muted-foreground text-xs">Point the domain's nameservers at:</p>
-			{#each nameservers.ns as ns (ns)}
-				<code class="block font-mono text-xs">{ns}</code>
-			{/each}
-		</div>
-	{/if}
+<div class="space-y-4">
+ <p class="text-sm text-muted-foreground">Setup selected this mail domain. Activation provisions its mail DNS and exact mailbox rules. The installer shows the DNS changes; pilot activation keeps the apex provider.</p>
+ {#if loading}<p class="flex gap-2"><Spinner /> Loading configured domain?</p>
+ {:else if failed}<p>Cloudflare could not be reached. Run doctor and check the runtime token.</p><Button onclick={load}>Retry</Button>
+ {:else if !domains.length}<p>Add the parent zone to the selected Cloudflare account and run setup.</p>
+ {:else}{#each domains as domain (domain.id)}
+  <div class="flex flex-wrap items-center justify-between gap-3 rounded border p-4">
+   <span class="font-mono">{domain.name}</span>
+   <Button disabled={busy || !domain.active} onclick={() => activate(domain.name)}>{busy ? 'Configuring?' : 'Activate selected mail domain'}</Button>
+  </div>
+ {/each}{/if}
 </div>

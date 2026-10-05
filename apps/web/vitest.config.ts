@@ -13,6 +13,7 @@ export default defineConfig({
   resolve: {
     alias: [
       { find: "$app/server", replacement: r("./src/test/stubs/app-server.ts") },
+      { find: /^\$app\/env$/, replacement: r("./src/test/stubs/app-env.ts") },
       { find: "$app/env/private", replacement: r("./src/test/stubs/app-env-private.ts") },
       { find: "$app/env/public", replacement: r("./src/test/stubs/app-env-public.ts") },
       { find: /^\$lib\/(.*)$/, replacement: r("./src/lib/$1") },

@@ -9,6 +9,7 @@ import { loadTemplateForSend, renderTemplate, sensitiveKeysOf } from "$lib/serve
 import { builtinMergeData } from "$lib/mjml/variables.js";
 import { unsubscribeUrlFor } from "@doota/mail-core/unsubscribe";
 import { resolveApiAttachments, type ApiAttachmentInput } from "$lib/server/api-attachments.js";
+import { readableMessageReference } from "@doota/mail-core/message-access";
 
 /**
  * Programmatic send via bearer API key (Part I). External/machine clients POST
@@ -56,6 +57,12 @@ export const POST: RequestHandler = async ({ request, locals, platform, url }) =
     error(401, "This key is no longer valid.");
   }
   const createdByUserId = actor.isService ? null : actor.userId;
+  const parentMessageId = typeof body.parentMessageId === "string" ? body.parentMessageId : null;
+  if (parentMessageId) {
+    // A key cannot use the instance encryption key to quote another mailbox.
+    // Check before fetching/staging attachments; enqueue and delivery recheck.
+    await readableMessageReference(locals.db, { userId: createdByUserId, mailboxId }, sender.orgId, parentMessageId);
+  }
 
   const asAddrs = (value: unknown): string[] =>
     Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
@@ -117,7 +124,7 @@ export const POST: RequestHandler = async ({ request, locals, platform, url }) =
     subject,
     text,
     html,
-    parentMessageId: typeof body.parentMessageId === "string" ? body.parentMessageId : null,
+    parentMessageId,
     sendAt: typeof body.sendAt === "number" ? body.sendAt : null,
     idempotencyKey: typeof body.idempotencyKey === "string" ? body.idempotencyKey : crypto.randomUUID(),
     attachments,

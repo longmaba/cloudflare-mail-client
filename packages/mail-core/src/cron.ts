@@ -10,6 +10,7 @@ import { purgeExpiredSendData } from "./send-log";
 import { pruneChangeLog } from "./change-log";
 import { sweepJunk } from "./spam";
 import { sweepDueWebhooks, pruneWebhookDeliveries } from "./webhooks";
+import { sweepDueInboundReceipts } from "./inbound-receipts";
 
 type Db = DrizzleD1Database<typeof schema>;
 
@@ -29,7 +30,8 @@ const DAILY_ODDS = 1 / 288;
 export async function runScheduledSweeps(
   db: Db,
   env: OutboundEnv,
-): Promise<{ dueEnqueued: number; snoozesWoken: number; webhooksRedriven: number; staleDraftsDeleted: number; notificationsPruned: number; pushSubsPruned: number; sendDataPurged: number; changeLogPruned: number; junkHidden: number; webhookDeliveriesPruned: number }> {
+): Promise<{ inboundRedriven: number; dueEnqueued: number; snoozesWoken: number; webhooksRedriven: number; staleDraftsDeleted: number; notificationsPruned: number; pushSubsPruned: number; sendDataPurged: number; changeLogPruned: number; junkHidden: number; webhookDeliveriesPruned: number }> {
+  const inboundRedriven = env.MAIL_QUEUE ? await sweepDueInboundReceipts(db, env.MAIL_QUEUE) : 0;
   const dueEnqueued = await sweepDueSubmissions(db, env.MAIL_OUT_QUEUE);
   // User-facing timing (a snooze returning to the inbox) — runs every 5 min, not
   // daily-gated.
@@ -58,5 +60,5 @@ export async function runScheduledSweeps(
   // Webhook delivery-row retention (terminal rows past the window). Folds into
   // the daily GC — not a second cron.
   const webhookDeliveriesPruned = daily ? await pruneWebhookDeliveries(db) : 0;
-  return { dueEnqueued, snoozesWoken, webhooksRedriven, staleDraftsDeleted, notificationsPruned, pushSubsPruned, sendDataPurged, changeLogPruned, junkHidden, webhookDeliveriesPruned };
+  return { inboundRedriven, dueEnqueued, snoozesWoken, webhooksRedriven, staleDraftsDeleted, notificationsPruned, pushSubsPruned, sendDataPurged, changeLogPruned, junkHidden, webhookDeliveriesPruned };
 }

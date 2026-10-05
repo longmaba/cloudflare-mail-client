@@ -27,7 +27,7 @@
 
 <AuthShell
 	title="Forgot password"
-	description="Enter your Doota email. If it has a verified recovery address, we'll send a reset link there."
+	description="Enter your domain email. If recovery is configured, we'll send a ten-minute setup or reset link to your external inbox."
 >
 	{#if sent}
 		<div class="flex flex-col items-center gap-3 py-4 text-center">
@@ -39,7 +39,7 @@
 		<form onsubmit={request}>
 			<Field.Group>
 				<Field.Field>
-					<Field.Label>Your Doota email</Field.Label>
+					<Field.Label>Your domain email</Field.Label>
 					<InputGroup>
 						<InputGroupInput
 							type="email"

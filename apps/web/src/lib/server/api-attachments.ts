@@ -80,6 +80,9 @@ export async function resolveApiAttachments(env: Env, orgId: string, inputs: Api
   const out: StoredAttachment[] = [];
   let total = 0;
   for (const a of inputs) {
+    if (!a || typeof a !== "object" || "r2Key" in a || "messageId" in a || "attachmentId" in a) {
+      error(400, "API attachments must supply new content or a URL, not a stored attachment reference.");
+    }
     if (typeof a.filename !== "string" || !a.filename.trim()) error(400, "Each attachment needs a filename.");
     const filename = a.filename.trim();
     const hasContent = typeof a.content === "string" && a.content.length > 0;

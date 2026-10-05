@@ -9,6 +9,8 @@ import { getDb } from '@doota/db';
 import { user } from '@doota/db/schema';
 import { APIError } from 'better-auth/api';
 import { SETUP_TOKEN } from '$app/env/private';
+import { MAIL_DOMAIN } from '$app/env/private';
+import { isDomainAddress, isExternalRecovery } from '$lib/server/auth/recovery-policy.js';
 
 /**
  * First-run genesis wizard. Email-free: the super-admin's trust root is deploy
@@ -20,13 +22,13 @@ import { SETUP_TOKEN } from '$app/env/private';
  */
 export const setupRemoteFunction = form(
 	setupSchema,
-	async ({ name, email, password, setupToken }) => {
+	async ({ name, email, password, recoveryEmail, setupToken }) => {
 		if (!SETUP_TOKEN || setupToken !== SETUP_TOKEN) {
 			return { success: false, message: 'Invalid or missing setup token.' };
 		}
 
 		const db = getDb(getRequestEvent().platform?.env.DB!);
-		// Bootstrap only: the first user is the external super-admin (auto-assigned
+		// Bootstrap only: the first user is the domain administrator (auto-assigned
 		// the superadmin role via databaseHooks). Everyone else is provisioned by
 		// an admin under an organization. This also permanently locks /setup out.
 		const userCount = await db.$count(user);
@@ -37,12 +39,17 @@ export const setupRemoteFunction = form(
 			};
 		}
 
-		// The super-admin is external: their login email must not be on a domain
-		// this server hosts (at bootstrap there are no served domains yet).
-		if (await isServedDomain(db, email)) {
+		const domain = MAIL_DOMAIN?.trim().toLowerCase();
+		if (!domain) {
+			return { success: false, message: 'Run setup to configure the mail domain before creating an administrator.' };
+		}
+		if (!isDomainAddress(email, domain)) {
+			return { success: false, message: `Administrator email must use @${domain}.` };
+		}
+		if (!isExternalRecovery(recoveryEmail, domain) || await isServedDomain(db, recoveryEmail)) {
 			return {
 				success: false,
-				message: 'Use an external email address — not one on a domain this server hosts.'
+				message: 'Recovery email must be an external address, not on a hosted domain.'
 			};
 		}
 
@@ -54,6 +61,8 @@ export const setupRemoteFunction = form(
 				name,
 				email,
 				password,
+				recoveryEmail,
+				domain,
 				image: getDiceBearURL({ seed: email })
 			})
 		);
@@ -67,10 +76,10 @@ export const setupRemoteFunction = form(
 		}
 
 		// No verification email — genesis is email-free. Next: log in, then the
-		// onboarding gate forces securing the account (2FA / passkey).
+		// onboarding gate requires recovery verification and authenticator TOTP.
 		return {
 			success: true,
-			message: 'Super-admin created. Log in and secure your account (2FA / passkey) to finish setup.'
+			message: 'Administrator created. Log in, activate your domain, verify recovery and enroll authenticator two-factor authentication.'
 		};
 	}
 );

@@ -30,13 +30,13 @@
 	const shell = $derived(
 		step === 'credentials'
 			? {
-					title: 'Doota',
+					title: page.data.appName ?? 'Domain Mail',
 					description: page.url.searchParams.has('add')
 						? 'Add another account to this device.'
 						: 'Log in to your mailbox.'
 				}
 			: step === 'entering'
-				? { title: 'Doota', description: 'Signing you in…' }
+				? { title: page.data.appName ?? 'Domain Mail', description: 'Signing you in…' }
 				: {
 						title: 'Two-factor check',
 						description: useBackup

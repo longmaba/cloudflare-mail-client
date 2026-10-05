@@ -50,6 +50,7 @@ export default {
       MAIL_SEARCH_KEY: env.MAIL_SEARCH_KEY,
       MAIL_RAW: env.MAIL_RAW,
       MAIL_OUT_QUEUE: env.MAIL_OUT_QUEUE,
+      MAIL_QUEUE: env.MAIL_QUEUE,
       WEBHOOK_QUEUE: env.WEBHOOK_QUEUE,
     };
     ctx.waitUntil(runScheduledSweeps(db, outbound));

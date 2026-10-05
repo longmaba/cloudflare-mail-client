@@ -3,14 +3,15 @@
   "private": true,
   "version": "0.0.1",
   "type": "module",
+  "engines": { "node": ">=24 <25", "pnpm": ">=10 <11" },
   "//": "Alchemy IaC for the three Workers (web, mail-in, mail-jobs). Commands run with cwd = this folder, so alchemy.run.ts references the repo via ../ paths. NODE_OPTIONS strips TS types (needed until node >= 22.18).",
   "scripts": {
-    "alchemy": "NODE_OPTIONS=--experimental-strip-types alchemy",
-    "plan": "NODE_OPTIONS=--experimental-strip-types alchemy plan",
-    "deploy": "NODE_OPTIONS=--experimental-strip-types alchemy deploy",
-    "deploy:staging": "NODE_OPTIONS=--experimental-strip-types alchemy deploy --stage staging --yes",
-    "destroy": "NODE_OPTIONS=--experimental-strip-types alchemy destroy",
-    "check": "tsc -p tsconfig.json"
+    "alchemy": "node run.mjs",
+    "plan": "node run.mjs plan",
+    "deploy": "node run.mjs deploy",
+    "deploy:staging": "node run.mjs deploy --stage staging",
+    "destroy": "node run.mjs destroy",
+    "check": "node ../apps/web/node_modules/typescript/bin/tsc -p tsconfig.json"
   },
   "devDependencies": {
     "@effect/platform-node": "4.0.0-beta.102",

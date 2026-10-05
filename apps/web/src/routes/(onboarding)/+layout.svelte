@@ -1,4 +1,5 @@
 <script lang="ts">
+ import { page } from '$app/state';
 	// SPDX-License-Identifier: Apache-2.0
 	import LogOutIcon from '@lucide/svelte/icons/log-out';
 	import { authClient } from '$lib/client/auth-client';
@@ -22,7 +23,7 @@
 	<header class="flex h-14 items-center justify-between border-b px-4 md:px-6">
 		<div class="flex items-center gap-2">
 			<Logo size={26} />
-			<span class="font-heading text-lg font-semibold tracking-tight">Doota</span>
+			<span class="font-heading text-lg font-semibold tracking-tight">{page.data.appName ?? 'Domain Mail'}</span>
 		</div>
 		<div class="flex items-center gap-3">
 			<span class="text-muted-foreground hidden font-mono text-xs sm:inline">{data.user.email}</span>

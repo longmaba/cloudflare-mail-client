@@ -1,46 +1,45 @@
 # Flows
 
-## Bootstrap: first super-admin — EMAIL-FREE genesis
+> **Upstream reference: use the guided installer.**
+>
+> This page retains upstream Doota implementation details and historical commands.
+> For this fork, follow the [current guided setup](https://github.com/longmaba/cloudflare-mail-client#install) using Node 24, pnpm 10
+> and `pnpm run setup`; use `pnpm run doctor` for read-only diagnostics and
+> `pnpm run upgrade` for published releases. Native sending requires Workers Paid.
+> The installer preserves the selected account, domain, resource names and keys.
+> Older direct-deploy and automatic-deploy instructions below are historical reference,
+> not the installation path for a saved instance. See [current operations](https://github.com/longmaba/cloudflare-mail-client/blob/main/docs/OPERATIONS.md)
+> and the [staged pilot guide](https://github.com/longmaba/cloudflare-mail-client/blob/main/docs/KIENG-PILOT.md).
 
-At genesis **no domain is onboarded**, so Cloudflare Email Routing/Sending don't
-exist yet — there is no path to deliver mail. So genesis must not depend on
-email. **The trust root is deploy access (possession of instance secrets), not
-an email round-trip.** Two surfaces, same trust model, both gated on
-`userCount === 0`:
+## Bootstrap: protected domain administrator setup
 
-**CLI (the guaranteed floor — works with no web layer and no mail):**
-`pnpm reset-admin <external-email> <password> [--name "…"]`. When no super-admin
-exists it runs in **genesis** mode: creates the super-admin, links the password,
-and **enrolls TOTP** (mirrors better-auth's own storage — an encrypted secret +
-backup codes). It prints the `otpauth://` URI + backup codes to scan. No mail.
-The same command is the reset/recovery escape hatch once the account exists.
+Run `pnpm run setup` from the repository root. It configures the selected mail
+domain and saves a private one-use bootstrap URL in `.local/bootstrap.json`,
+then opens the protected `/setup` wizard in a local interactive terminal.
+The server checks the setup token and permits bootstrap only while no user
+exists and the genesis lock is unused. Once completed, bootstrap stays locked.
 
-**Optional web `/setup` wizard:** renders ONLY when `userCount === 0` **AND** the
-one-time `SETUP_TOKEN` (env) is presented (`/setup?token=…`). `setup.remote.ts`
-re-checks both server-side. It creates the super-admin + password (TOTP is added
-later via the onboarding secure-account step). No verification mail is sent. Once
-any user exists the wizard locks out permanently.
+The administrator signs in as an address on the configured `MAIL_DOMAIN`
+(for example, `admin@pilot.kieng.io.vn`), with a separate external recovery
+address and a password. Bootstrap initializes the pending organization, owner
+and administrator mailbox. It sends no mail until the selected domain has
+a working sending path. Public registration remains disabled.
 
-In both paths the super-admin is created with an **external** email
-(`isServedDomain` rejects served-domain addresses) stored **unverified**
-(`email_verified = false`). If password linking fails the just-created user is
-deleted so the `userCount` guard can't wedge the bootstrap on retry.
+`reset-admin` is an existing-superadmin password-recovery tool. It cannot
+create the first user, create a mailbox, or bootstrap an external login identity.
+Use the private wizard for first-run provisioning; never the old CLI genesis flow.
 
-Every later account is provisioned by an admin/super-admin through the
-organization flow below.
+## Administrator recovery and verification
 
-## Deferred super-admin email verification
+After signing in, the administrator activates the selected mail domain, verifies
+the external recovery inbox, and enrolls authenticator TOTP before onboarding
+completes. Recovery verification is required for every role. A passkey does not
+replace the administrator TOTP requirement. Password-reset links go to the
+verified external recovery address, not the hosted login address.
 
-The super-admin's external email is intentionally **unverified at genesis**.
-Verifying it is an optional, super-admin-triggered action
-(`requestSuperadminEmailVerification`, surfaced on `/admin/settings`) that only
-becomes available once **at least one domain is `active`** — i.e. there is a
-working sending path to actually deliver the mail. Until then:
-
-- password reset by email no-ops for the super-admin (`sendResetPassword` only
-  targets `user.email` when `emailVerified` is true), and
-- the **CLI `reset-admin` is the recovery floor** — recovery never depends on an
-  unverified/undeliverable path.
+Before mail activation, an existing superadmin can recover through the operator
+CLI with deployment access to the saved instance. Remote recovery needs
+Cloudflare access; it does not need delivery to the administrator's inbox.
 
 ## Onboarding gate (`hooks.server.ts` + `onboarding.ts`)
 
@@ -51,12 +50,12 @@ gate lives in `hooks.server.ts`:
   wandering back into `/onboarding`.
 - Otherwise `getOnboardingStatus(db, user)` derives the remaining steps **reading
   the gating flags fresh from D1** (never the 5-minute session cookie cache):
-  - `superadmin` → **secure account** only (2FA / passkey). No email step — email
-    verification is deferred (see above), so genesis needs no mail path.
-  - `admin` → verify **recovery email** + **secure account**
+  - `superadmin` -> activate the configured mail domain, verify external
+    **recovery email**, and enroll **authenticator TOTP**.
+  - `admin` -> verify **recovery email** and enroll **authenticator TOTP**.
   - `member` → verify **recovery email**
-  - anyone provisioned with a temp password → **set password**
-    (`mustChangePassword`)
+  - invited users -> **set password** through the recovery setup link
+    (`mustChangePassword`); no usable temporary password is sent.
 - If complete → `markOnboarded` stamps `onboardedAt` **on that same request**,
   then the session is refetched with `disableCookieCache: true` so the signed
   cookie reflects it immediately and later requests take the fast path.
@@ -70,44 +69,23 @@ step cards.
 
 ## Domain onboarding via Cloudflare (super-admin only)
 
-`/admin/domains`. Super-admin only; uses the instance token (`APP_CLOUDFLARE_ACCOUNT_ID` +
-`APP_CLOUDFLARE_API_TOKEN`, a scoped Bearer token). `domains.remote.ts` → `server/cloudflare.ts`.
+The onboarding checklist and `/admin/domains` use the saved, zone-scoped
+runtime token (`APP_CLOUDFLARE_ACCOUNT_ID` + `APP_CLOUDFLARE_API_TOKEN`).
+The app accepts only the installer's configured `MAIL_DOMAIN` inside
+`MAIL_ZONE_ID`/`MAIL_ZONE_NAME`; it does not onboard arbitrary zones.
 
-**Pick, don't type.** `listCloudflareZones` lists every zone on the operator's
-CF account (flagging which are already onboarded) so they choose a domain instead
-of typing it. A manual field remains for a domain **not yet on Cloudflare**. An
-optional **sending subdomain** (outbound DKIM host, e.g. `send.acme.com`) can be
-supplied at onboard time; it must sit within the domain.
+In pilot/manual mode, activation configures only the selected subdomain's
+receiving and sending records, then synchronizes literal recipient rules for
+active mailboxes and enabled aliases to `MAIL_IN_WORKER_NAME`. Existing provider
+MX at the apex stays in place. A subdomain cannot use an apex catch-all.
+Existing conflicting MX, recipient rules or DNS policies require operator review;
+refresh does not silently replace them. Apex routing/catch-all activation is
+reserved for an explicitly selected apex cutover after pilot acceptance.
 
-`onboardDomain`:
-
-1. Create the org for the domain (super-admin becomes owner) if it doesn't exist.
-2. `zoneCreate`: if the domain is **already a zone on the account → reuse it**
-   (straight to wiring, no error — this is the "already configured on Cloudflare"
-   case). Brand-new → `POST /zones`, returns pending status + assigned
-   **nameservers**, surfaced to the operator. The request is **not** blocked on
-   activation — it's async D1 state.
-3. Once the zone is `active` (checked on onboard, or by the **Refresh** button →
-   `refreshDomain` poll), wire mail **idempotently**: enable Email Routing, write
-   MX + SPF (inbound), onboard the sending domain/subdomain (DKIM + DMARC +
-   cf-bounce), and point the catch-all rule at the mail-in Worker
-   (`MAIL_IN_WORKER_NAME`). Every call is check-then-create / tolerates "already
-   exists".
-
-**DNS records** to populate (Email Sending DKIM/DMARC/return-path) are fetched
-live per domain via `domainDnsRecords` and shown on the screen — never persisted.
-For a Cloudflare-hosted zone they're created automatically; the list is there for
-operators whose DNS lives elsewhere.
-
-Subdomain **mailbox routing** (inbound `*@mail.acme.com`) is not built — Email
-Routing catch-all is zone-level (apex). The optional subdomain above is
-outbound-sending only.
-
-**Storage:** D1 holds only `domain`, `zone_id`, the org mapping, and a `status`
-enum (`pending_zone | pending_nameservers | wiring | active | error`). DNS/DKIM/
-routing state is **never persisted** — fetched live from CF for settings screens.
-The CF API is **never** touched on the inbound-mail hot path or login validation
-(those read the cached `domain→org→zone` map).
+D1 stores the organization/domain/zone mapping and onboarding status. DNS and
+routing details are inspected live through Cloudflare. Run `pnpm run doctor`
+and the staged send/receive tests before considering the pilot ready. Cloudflare
+API calls do not run on the inbound-mail hot path or password validation.
 
 ## Admin provisions a member / admin (org-centric)
 
@@ -124,16 +102,14 @@ the invite mail can be delivered).
    (`actorOrgAdminOf`). Otherwise refused.
 2. Resolve the org by id; build `email = <username>@<org.domain>`.
 3. Recovery email must be **external** (`isServedDomain` guard).
-4. Create the user (`role`, `recoveryEmail`, `mustChangePassword: true`), link a
-   **random temp password**; on link failure the user is rolled back.
-5. Insert the `member` row (org membership role `admin` or `member`).
-6. Mail one invite to the **external recovery address**: login email + temp
-   password + a recovery-verification link (the same `recovery-email:<token>`
-   the verify route consumes).
+4. Create the user with an inaccessible initial credential and
+   `mustChangePassword: true`; create its organization membership and mailbox.
+5. Install the scoped literal receiving rule before sending an invitation.
+6. Send a ten-minute, single-use password-setup link to the external recovery
+   inbox. No usable password appears in the email or URL.
 
-The invited user then signs in with the temp password → the onboarding gate
-forces **set password** + **verify recovery** (+ **secure account** for an
-admin). See `provisionUser`'s `ponytail:` note on the emailed temp password.
+The invited user chooses a password through the link, signs in using the hosted
+address, verifies recovery, and completes authenticator TOTP if an administrator.
 
 Member management also exposes **pause** (`pauseUser` — sets `banned` and deletes
 the user's `session` rows so access is cut immediately, not after the cache
@@ -152,8 +128,8 @@ account). Both re-check `can()` and refuse to act on yourself or a super-admin.
 ## Login Flow B — passkey
 
 1. Trigger passkey login → WebAuthn assertion → session.
-2. **No TOTP step after a passkey.** A passkey is already two factors (device +
-   biometric/PIN); stacking TOTP is redundant.
+2. A passkey is an alternative sign-in method. Administrator onboarding still
+   requires authenticator TOTP; passkey enrollment alone does not complete it.
 3. Passkey enrollment requires an existing session, so a new user logs in via
    Flow A first, then adds a passkey (onboarding secure-account card or
    `/account/security`).
@@ -163,11 +139,9 @@ account). Both re-check `can()` and refuse to act on yourself or a super-admin.
 1. User enters their **Doota email** (never asked which recovery address).
 2. `requestPasswordReset` always returns the same generic 200 — no enumeration.
 3. Rate limited to 3 / 60 s.
-4. `sendResetPassword` (override in `auth.ts`) sends the link **to the verified
-   `recoveryEmail`, never `user.email`** (for a member), or the external primary
-   for a super-admin, and only when the target is verified & external. The send
-   is **backgrounded** (`waitUntil`) so a mail failure can't turn the generic 200
-   into a 500 and mail latency can't be used to probe account existence.
+4. `sendResetPassword` sends only to a verified external `recoveryEmail`
+   for every role. Hosted login addresses are not reset destinations. Delivery
+   is backgrounded so errors cannot expose whether an account exists.
 5. The `/forgot-password` and `/reset-password` routes redirect authenticated
    users away — those are the logged-out flow only.
 
@@ -187,8 +161,8 @@ Authenticated users change their password through a popup, not the token flow
 emailed code **and** the current password:
 
 1. `requestPasswordResetCode` (`reset-password.remote.ts` → `password-reset.ts`)
-   mails a 6-digit code to the reset target (super-admin → external primary;
-   others → verified recovery). Throttled 1 / 60 s; one active code per user
+   mails a 6-digit code to the verified external recovery address for every role.
+   Throttled 1 / 60 s; one active code per user
    (10-min TTL); reuses the `verification` table (`pwreset:<id>`).
 2. `confirmPasswordReset` requires the code **and** `currentPassword`, then goes
    through `auth.api.changePassword({ revokeOtherSessions: true })` so the
@@ -199,8 +173,8 @@ emailed code **and** the current password:
 - `setRecoveryEmail` (`recovery-email.remote.ts`, requires a session):
   rejects served-domain addresses, sets `recoveryEmailVerified = false`, sends a
   confirm link. Throttled to **one email per user per minute**.
-- `verify-recovery-email?token=` consumes the token (single-use, 1-hour expiry;
-  24-hour for provisioning invites). A token is rejected if the user's
+- `verify-recovery-email?token=` consumes the token (single-use, ten-minute
+  expiry). A token is rejected if the user's
   `recoveryEmail` changed after it was issued (stale link), then flips
   `recoveryEmailVerified = true`.
 
@@ -210,6 +184,12 @@ emailed code **and** the current password:
 2. **In-app change-password dialog** — self-service, code + current password.
 3. **Admin-initiated reset** for a member with no working recovery path — not
    yet built.
-4. **CLI** — `pnpm reset-admin <email> <new-password> [--remote] [--clear-2fa]`
-   resets a superadmin with **no email/network dependency**. See
-   `scripts/reset-admin.mjs`.
+4. **CLI, existing superadmins only** - from the repository root:
+
+   `pnpm --filter doota reset-admin admin@pilot.kieng.io.vn --remote`
+
+   Enter the new password at the masked prompt. This resets an existing
+   superadmin's password and revokes sessions; it cannot create users. Add
+   `--clear-2fa` only for deliberate operator recovery when backup codes are
+   unavailable, then re-enroll authenticator TOTP. See
+   `apps/web/scripts/reset-admin.mjs`.

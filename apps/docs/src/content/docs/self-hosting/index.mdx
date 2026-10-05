@@ -7,6 +7,19 @@ sidebar:
     label: Self-hosting
 ---
 
+<Aside type="caution" title="Upstream reference: use the guided installer">
+
+This page retains upstream Doota implementation details and historical commands.
+For this fork, follow the [current guided setup](https://github.com/longmaba/cloudflare-mail-client#install) using Node 24, pnpm 10
+and `pnpm run setup`; use `pnpm run doctor` for read-only diagnostics and
+`pnpm run upgrade` for published releases. Native sending requires Workers Paid.
+The installer preserves the selected account, domain, resource names and keys.
+Older direct-deploy and automatic-deploy instructions below are historical reference,
+not the installation path for a saved instance. See [current operations](https://github.com/longmaba/cloudflare-mail-client/blob/main/docs/OPERATIONS.md)
+and the [staged pilot guide](https://github.com/longmaba/cloudflare-mail-client/blob/main/docs/KIENG-PILOT.md).
+
+</Aside>
+
 Doota is meant to be run by you. This section takes a fresh Cloudflare account
 to a working instance that receives and sends real mail on your own domain.
 
@@ -36,12 +49,12 @@ Still with us? Here's what you'll need.
 
 ## What you'll need
 
-- A **Cloudflare account** (the free tier is enough to start; Workers Paid is
-  recommended for Queues throughput and higher limits).
+- A **Cloudflare account with Workers Paid** for native sending ($5/month
+  base, 3,000 outbound emails included monthly, then usage charges).
 - A **domain** you can point at Cloudflare — Doota's model is **one deployment =
   one company = one mail domain**. You can onboard several domains, each as its
   own organization.
-- **Node 22.18+**, **[pnpm](https://pnpm.io)**, and a local clone of the repo.
+- **Node 24**, **[pnpm 10](https://pnpm.io)**, and a local clone of the repo.
 - A **scoped Cloudflare API token** for the running app — Doota calls the CF
   API to onboard domains (zone, Email Routing, DNS, DKIM). See
   [Cloudflare API token](/self-hosting/cloudflare-api-token). (Deploying
@@ -54,37 +67,24 @@ Still with us? Here's what you'll need.
   critical mail.
 </Aside>
 
-## The deploy path, end to end
+## The current deployment path
 
-Doota deploys as **one stack** ([Alchemy](https://alchemy.run)): resources,
-Workers, bindings, migrations, and secrets all reconcile from a single
-declaration in `infra/`. No manual provisioning, no ID wiring, no
-secret-by-secret pushes.
+Run `pnpm run setup` from your checkout. It installs locked dependencies,
+selects your Cloudflare account/zone, detects existing mail providers and
+saves stable identity and secrets privately. It provisions three application
+Workers and shared storage, opens protected domain-admin setup, then runs
+read-only diagnostics.
 
-<Steps>
-  <Step title="Configure">
-    Decide your instance's settings — serving domain(s), the setup-wizard
-    token, and the app's
-    [Cloudflare API token](/self-hosting/cloudflare-api-token). Start at
-    [Configuration](/self-hosting/configuration); required secrets you don't
-    provide are minted automatically on the first deploy.
-  </Step>
-  <Step title="Deploy — pick your path">
-    **From your machine**: `pnpm alchemy login` once, then `pnpm infra:deploy`
-    — your instance comes up and prints its URL. **From GitHub**: set two
-    repository secrets and every merge to `main` deploys itself. Both paths:
-    [Deploy](/self-hosting/deploy).
-  </Step>
-  <Step title="First run">
-    Create the super-admin via `/setup`, onboard your first domain so Email
-    Routing and sending come online, send a test message. See
-    [First run](/self-hosting/first-run).
-  </Step>
-</Steps>
+Complete selected-domain activation, external recovery verification and
+authenticator TOTP. Use a pilot subdomain first if the apex already receives
+mail. Keep the old provider and history until staged acceptance and a deliberate
+cutover. Run `pnpm run doctor` after onboarding and use `pnpm run upgrade`
+for published releases. See the [current install guide](https://github.com/longmaba/cloudflare-mail-client#install).
 
 ## What each Worker binds
 
-Five Workers deploy; three carry state. A queue binds to exactly **one**
+The guided installer deploys three application Workers. The landing/docs
+rows below describe separate upstream static sites, not installed mail Workers. A queue binds to exactly **one**
 consumer, so the web app only _produces_ — the async handlers live in the mail
 Workers.
 

@@ -99,6 +99,16 @@ const check = (over: Partial<VacationCheckInput> = {}): Omit<VacationCheckInput,
 });
 
 async function attempt(over: Partial<VacationCheckInput> = {}, messageId = `<${crypto.randomUUID()}@ext>`) {
+  // Production invokes the responder after inbound message/delivery creation.
+  // A header alone cannot authorize quoting a source message.
+  const existing = await db.query.message.findFirst({ where: eq(schema.message.messageIdHeader, messageId), columns: { id: true } });
+  if (!existing) {
+    const id = crypto.randomUUID();
+    const threadId = crypto.randomUUID();
+    await db.insert(schema.thread).values({ id: threadId, orgId: ORG, lastMessageAt: new Date() });
+    await db.insert(schema.message).values({ id, orgId: ORG, threadId, messageIdHeader: messageId, fromAddr: over.fromAddress ?? "friend@ext.com", sentAt: new Date(), toAddrs: JSON.stringify(["alice@acme.com"]) });
+    await db.insert(schema.delivery).values({ orgId: ORG, messageId: id, mailboxId: "mb1", role: "to" });
+  }
   return maybeVacationReply(db, env(), {
     mailboxId: "mb1", orgId: ORG, check: check(over), messageIdHeader: messageId, subject: "Hi",
   });

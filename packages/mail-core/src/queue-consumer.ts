@@ -23,6 +23,7 @@ import { recordNewMail } from "./notify";
 import { recordCorrespondents } from "./contacts";
 import { log, errInfo, tryLog } from "./log";
 import type { InboundJob, MailEnv } from "./inbound-worker";
+import { ensureInboundReceipt, beginInboundReceipt, completeInboundReceipt, failInboundReceipt } from "./inbound-receipts";
 
 /**
  * Inbound queue consumer — the heavy, idempotent work. Fetch raw from R2, parse
@@ -125,6 +126,7 @@ function toParsedMessage(parsed: PMParsed, job: InboundJob): ParsedMessage {
     text: parsed.text ?? null,
     html: parsed.html ?? null,
     r2RawKey: job.r2RawKey,
+    dedupeByRaw: true,
     dmarcPass: job.dmarcPass ?? false, // ?? false: jobs queued before this field
 
     // r2Key is filled by stageInboundAttachments before materialize — a null
@@ -159,7 +161,9 @@ async function stageInboundAttachments(
     const content = parts[i]?.content;
     if (content == null) continue;
     const bytes = typeof content === "string" ? new TextEncoder().encode(content) : content;
-    const key = `attachments/${orgId}/${crypto.randomUUID()}`;
+    // Deterministic per raw message/part: retries do not leak orphan copies or
+    // swap another message's binary attachment after a Message-ID collision.
+    const key = `attachments/${orgId}/${pm.r2RawKey?.split("/").at(-1)}/${i}`;
     // Attachment bytes encrypted at rest, same as the raw. The declared type
     // lives on the D1 attachment row; the R2 object is opaque ciphertext.
     await putEncryptedBlob(env.MAIL_RAW, key, ck, bytes, {
@@ -607,13 +611,20 @@ export async function handleQueue(batch: QueueBatch, env: MailEnv): Promise<void
       continue;
     }
     const job = m.body as InboundJob;
+    let receiptId: string | undefined;
     try {
-      const buf = await getDecryptedBlob(env.MAIL_RAW, job.r2RawKey, ck);
-      if (!buf) {
-        // Raw is gone (already processed + swept, or never landed). Nothing to
-        // reconstruct, so ack rather than retry forever.
+      receiptId = await ensureInboundReceipt(db, job);
+      const claim = await beginInboundReceipt(db, receiptId);
+      if (claim === "complete") { m.ack(); continue; }
+      if (claim === "busy") { m.retry(); continue; }
+      if (claim === "exhausted") {
+        await failInboundReceipt(db, receiptId, new Error("Processing retry limit reached. Replay this receipt after fixing the failure; encrypted raw mail is retained."));
         m.ack();
         continue;
+      }
+      const buf = await getDecryptedBlob(env.MAIL_RAW, job.r2RawKey, ck);
+      if (!buf) {
+        throw new Error("Encrypted raw mail is missing. Restore the R2 object and replay this receipt.");
       }
       const parsed = (await PostalMime.parse(buf)) as PMParsed;
 
@@ -659,6 +670,7 @@ export async function handleQueue(batch: QueueBatch, env: MailEnv): Promise<void
             returnPathDomain: rp?.returnPathDomain ?? null,
             matchedSubmission: applied.matchedSubmission ?? null,
           });
+          await completeInboundReceipt(db, receiptId);
           m.ack();
           continue;
         }
@@ -699,9 +711,13 @@ export async function handleQueue(batch: QueueBatch, env: MailEnv): Promise<void
         }
       }
 
+      await completeInboundReceipt(db, receiptId);
       m.ack();
     } catch (e) {
       log.error("in.job_retry", { r2Key: job.r2RawKey, ...errInfo(e) });
+      if (receiptId) await failInboundReceipt(db, receiptId, e).catch((journalError) => {
+        log.error("in.journal_failed", { receiptId, ...errInfo(journalError) });
+      });
       m.retry();
     }
   }

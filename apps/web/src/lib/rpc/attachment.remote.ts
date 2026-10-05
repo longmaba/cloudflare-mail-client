@@ -3,10 +3,9 @@ import { query, command, getRequestEvent } from "$app/server";
 import { error } from "@sveltejs/kit";
 import { z } from "zod";
 import type { ScanVerdict } from "@doota/mail-core/attachment-scan";
-import { and, eq, inArray } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import * as schema from "@doota/db/schema";
-import { can } from "@doota/db/can";
-import { getAuthz } from "$lib/server/authz.js";
+import { canReadMessage } from "@doota/mail-core/message-access";
 
 /**
  * Attachment scan verdicts: advisory display signal only. The verdict is
@@ -34,25 +33,7 @@ async function assertAttachmentAccess(attachmentId: string) {
   });
   if (!message) error(404, "Attachment not found");
 
-  const { mailboxIds, orgAdminOf } = await getAuthz();
-  let allowed = false;
-  if (mailboxIds.length) {
-    const del = await locals.db.query.delivery.findFirst({
-      where: and(
-        eq(schema.delivery.messageId, att.messageId),
-        inArray(schema.delivery.mailboxId, mailboxIds),
-      ),
-      columns: { id: true },
-    });
-    allowed = !!del;
-  }
-  if (!allowed) {
-    allowed = can(
-      { id: user.id, role: user.role, orgAdminOf },
-      "read",
-      { type: "mailbox", ownerId: "", organizationId: message.orgId },
-    );
-  }
+  const allowed = await canReadMessage(locals.db, { userId: user.id }, att.messageId, message.orgId);
   if (!allowed) error(403, "You can't access this attachment.");
   return { db: locals.db };
 }

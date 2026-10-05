@@ -21,9 +21,10 @@ beforeEach(() => vi.clearAllMocks());
 describe("sendRecoveryEmailVerification", () => {
   it("issues a namespaced token and mails the recovery address", async () => {
     await sendRecoveryEmailVerification("u1", "r@ext.com", { name: "n", email: "e@x" });
-    const [identifier, value] = vi.mocked(tokenStore.issue).mock.calls[0];
+    const [identifier, value, ttl] = vi.mocked(tokenStore.issue).mock.calls[0];
     expect(identifier).toMatch(/^recovery-email:/);
     expect(JSON.parse(value)).toEqual({ userId: "u1", email: "r@ext.com" });
+    expect(ttl).toBe(10 * 60 * 1000);
     expect(sendMail).toHaveBeenCalledOnce();
     expect(vi.mocked(sendMail).mock.calls[0][0].to).toBe("r@ext.com");
   });

@@ -1,10 +1,10 @@
 import tailwindcss from '@tailwindcss/vite';
 import devtoolsJson from 'vite-plugin-devtools-json';
 import { sveltekit } from '@sveltejs/kit/vite';
-import { defineConfig } from 'vite';
+import { defineConfig, type PluginOption } from 'vite';
 
 export default defineConfig({
-	plugins: [tailwindcss(), sveltekit(), devtoolsJson()],
+	plugins: [tailwindcss(), sveltekit() as unknown as PluginOption, devtoolsJson()],
 	// harper.js + mrml resolve their WASM relative to their own files. Dep
 	// pre-bundling rewrites those paths to `.vite/deps/` where the binary isn't
 	// copied, so it 404s in dev. Excluding them serves the packages from

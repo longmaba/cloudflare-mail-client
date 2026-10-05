@@ -5,7 +5,7 @@ import { renderEmail } from "./email";
 import { tokenStore, setUserAuthFlags } from "./auth/escape-hatches.js";
 import { getUserForRecovery } from "./auth/repository.js";
 
-const TOKEN_TTL_MS = 60 * 60 * 1000; // 1 hour
+const TOKEN_TTL_MS = 10 * 60 * 1000; // 10 minutes, single-use
 
 /**
  * Reuses better-auth's verification table with a namespaced identifier (via the

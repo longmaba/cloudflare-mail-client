@@ -268,7 +268,7 @@ describe("drafts — send integration & alias defaulting", () => {
     expect(raw.text).toContain("50% OFF"); // the plain-text twin carries it too
   });
 
-  it("forward drops a source the sender can't access (no leak)", async () => {
+  it("rejects a forged forward source from another mailbox before saving a draft", async () => {
     // A message with NO delivery to any of u1's mailboxes.
     await db.insert(schema.thread).values({ id: "thX", orgId: ORG, lastMessageAt: new Date() });
     const mimeX = ["From: x@ext.com", "Content-Type: text/html", "", "<p>secret</p>"].join("\r\n");
@@ -280,16 +280,11 @@ describe("drafts — send integration & alias defaulting", () => {
     });
     await db.insert(schema.delivery).values({ id: "dX", orgId: ORG, messageId: "srcX", mailboxId: "mb_bob", role: "to" });
 
-    const d = await createDraft(db, ck, "u1", {
+    await expect(createDraft(db, ck, "u1", {
       mailboxId: "mb_alice", kind: "forward", to: ["friend@ext.com"], body: "<p>note</p>", forwardMessageIds: ["srcX"],
-    });
-    const { submissionId } = await sendDraft(db, env(), ck, "u1", { draftId: d.id });
-    const sub = await db.query.submission.findFirst({ where: eq(schema.submission.id, submissionId) });
-    const message = await db.query.message.findFirst({ where: eq(schema.message.id, sub.messageId) });
-    const dec = await getDecryptedBlob(r2 as never, message.r2RawKey, ck);
-    const raw = JSON.parse(new TextDecoder().decode(dec!)) as { html: string };
-    expect(raw.html).not.toContain("secret"); // access denied → not forwarded
-    expect(raw.html).toContain("note"); // note still sent
+    })).rejects.toMatchObject({ status: 403 });
+    expect(await db.query.draft.findMany()).toHaveLength(0);
+    expect(queue.sent).toHaveLength(0);
   });
 
   it("keeps BCC out of message headers — bcc lives only as a submission recipient", async () => {

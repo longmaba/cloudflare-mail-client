@@ -8,12 +8,11 @@ import { getDiceBearURL } from "$lib/utils/dice-bear.js";
 import { tryCatch } from "$lib/utils/try-catch.js";
 import { can, type Actor } from "@doota/db/can";
 import { isServedDomain, senderAddress } from "@doota/db/org-domains";
-import { sendMail, sendMailBackground } from "./mailer";
-import { renderEmail } from "./email";
 import { setUserAuthFlags } from "./auth/escape-hatches.js";
 import { ensurePersonalMailbox, addressHosts } from "@doota/mail-core/mailbox";
 import { seedWelcomeMessage } from "@doota/mail-core/welcome";
 import { importKey } from "@doota/mail-core/crypto";
+import { ensureMailboxRouting } from "./mail-routing.js";
 
 type Db = DrizzleD1Database<typeof schema>;
 
@@ -64,20 +63,15 @@ export async function actorOrgAdminOf(
     .map((row) => row.orgId);
 }
 
-// ponytail: emails a one-time temp password to the admin-vetted external
-// recovery address (classic invite). mustChangePassword forces a reset at first
-// login, so the temp value never survives onboarding. Upgrade to a set-password
-// magic link if plaintext-in-mail ever becomes unacceptable for this deployment.
-function tempPassword(): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(12));
-  return btoa(String.fromCharCode(...bytes))
-    .replace(/[+/=]/g, "")
-    .slice(0, 16);
+// Unknown until the owner redeems the setup link; never included in email/URLs.
+function inaccessiblePassword(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 /**
  * Create a member/admin under the organization that owns their email's domain,
- * then mail an invite (temp password + recovery-verification link) to their
+ * then mail a ten-minute single-use password setup link to their
  * external recovery address. Authorization runs through can() — superadmin or an
  * admin of the target org only.
  */
@@ -136,7 +130,7 @@ export async function provisionUser(
     };
   }
 
-  const password = tempPassword();
+  const password = inaccessiblePassword();
   // admin.createUser is atomic (user + credential account in one call), so the
   // old create/link/rollback dance is gone. recoveryEmail (input:true) rides in
   // `data` so the user.create hook re-validates it; mustChangePassword is
@@ -198,12 +192,16 @@ export async function provisionUser(
       displayName: input.name,
     }),
   );
-  if (mailboxError) console.error("[provision] personal mailbox failed", mailboxError);
+  if (mailboxError) {
+    console.error("[provision] personal mailbox failed", mailboxError);
+    return { success: false, message: "Account created but mailbox setup failed. Repair the mailbox before sending an invitation." };
+  }
+  const { error: routingError } = await tryCatch(ensureMailboxRouting(db, org.id, email));
+  if (routingError) {
+    console.error("[provision] mailbox routing failed", routingError);
+    return { success: false, message: "Account created but email routing failed. Finish routing setup before sending an invitation." };
+  }
 
-  // One invite mail: temp password only. No recovery-verification link — the
-  // invite is delivered only to the external recovery address, so a successful
-  // first login (with these creds) is itself proof of control, and the
-  // session-create hook auto-verifies the recovery email then.
   const from = await senderAddress(db, org.domain);
 
   // Seed the welcome message so the first login opens on something rather than
@@ -216,15 +214,15 @@ export async function provisionUser(
       seedWelcome({ orgId: org.id, mailboxId, address: email, displayName: input.name, from }),
     );
 
-  const mail = renderEmail("invite", {
-    from,
-    mailbox: email,
-    tempPassword: password,
-    loginLink: `${requestOrigin()}/login?email=${email}&password=${password}`,
-  });
-  await tryCatch(
-    sendMailBackground({ to: recoveryEmail, from, subject: mail.subject, text: mail.text, html: mail.html }),
+  // Better Auth owns token expiry/atomic consumption. Its reset callback binds
+  // the token to the external recovery address and renders the invitation.
+  const { error: inviteError } = await tryCatch(
+    locals.auth.api.requestPasswordReset({
+      body: { email, redirectTo: `${requestOrigin()}/reset-password` },
+      headers: request.headers,
+    }),
   );
+  if (inviteError) return { success: false, message: "Account created, but the setup link could not be sent. Request a new link from Forgot password." };
 
   return {
     success: true,

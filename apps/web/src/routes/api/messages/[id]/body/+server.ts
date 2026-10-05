@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import { error, type RequestHandler } from "@sveltejs/kit";
-import { and, eq, inArray } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import * as schema from "@doota/db/schema";
-import { can } from "@doota/db/can";
+import { canReadMessage } from "@doota/mail-core/message-access";
 import { importKey, decryptContent } from "@doota/mail-core/crypto";
 import { messageRawHtml } from "@doota/mail-core/mime";
 import { remoteContentAllowed } from "@doota/mail-core/sender-trust";
@@ -16,7 +16,6 @@ import {
 } from "@doota/mail-core/sanitize-email";
 import { stripQuotesHtml, cidMatches } from "@doota/mail-core/mail-thread-contract";
 import { splitSignatureHtml } from "$lib/mail/signature";
-import { getAuthz } from "$lib/server/authz.js";
 import { renderETag, isNotModified, revalidateHeaders } from "$lib/server/render-cache.js";
 import { signResourceToken } from "$lib/server/resource-token.js";
 import { log } from "@doota/mail-core/log";
@@ -83,22 +82,7 @@ export const GET: RequestHandler = async ({ params, url, request, locals, platfo
 
   // Access mirrors thread read + the attachment endpoint: a delivery to one of
   // the user's mailboxes, or org-level read via can().
-  const { mailboxIds: myBoxes, orgAdminOf } = await getAuthz();
-  let allowed = false;
-  if (myBoxes.length) {
-    const del = await locals.db.query.delivery.findFirst({
-      where: and(eq(schema.delivery.messageId, msg.id), inArray(schema.delivery.mailboxId, myBoxes)),
-      columns: { id: true },
-    });
-    allowed = !!del;
-  }
-  if (!allowed) {
-    allowed = can(
-      { id: user.id, role: user.role, orgAdminOf },
-      "read",
-      { type: "mailbox", ownerId: "", organizationId: msg.orgId },
-    );
-  }
+  const allowed = await canReadMessage(locals.db, { userId: user.id }, msg.id, msg.orgId);
   if (!allowed) error(403, "You can't access this message.");
   const tAccess = Date.now();
 

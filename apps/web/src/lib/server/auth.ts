@@ -11,10 +11,9 @@ import {
 } from "better-auth/plugins";
 import { createAccessControl } from "better-auth/plugins/access";
 import { adminAc, defaultStatements } from "better-auth/plugins/admin/access";
-import { APIError } from "better-auth/api";
+import { APIError, createAuthMiddleware } from "better-auth/api";
 import { passkey } from "@better-auth/passkey";
 import { getRequestEvent } from "$app/server";
-import { eq } from "drizzle-orm";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import * as schema from "@doota/db/schema";
 import { sendMailBackground } from "./mailer";
@@ -24,12 +23,14 @@ import {
   senderAddress,
   domainOf,
 } from "@doota/db/org-domains";
-import { BETTER_AUTH_SECRET } from "$app/env/private";
+import { BETTER_AUTH_SECRET, APP_NAME, MAIL_DOMAIN } from "$app/env/private";
 import { ORIGINS } from "$app/env/public";
 import { dev } from "$app/env";
 import { renderEmail } from "./email";
 import { kvSecondaryStorage } from "./auth/kv-secondary-storage.js";
 import { MAX_DEVICE_SESSIONS } from "$lib/auth-limits.js";
+import { recoveryResetTarget, isExternalRecovery } from "./auth/recovery-policy.js";
+import { rememberRecoveryReset, validRecoveryReset, completeRecoveryReset } from "./auth/escape-hatches.js";
 
 // Instance roles (admin plugin). Separate from org membership roles
 // (owner/admin/member), which the organization plugin manages per-membership.
@@ -47,7 +48,7 @@ type UserRecovery = {
 
 /**
  * Reject an address that lands on any domain this deployment serves. Recovery
- * addresses and the external super-admin's login email must be external. A
+ * addresses must be external. A
  * served-domain address recreates the circular "can't read your own mailbox
  * until you're logged in" problem. No-op when db is absent (schema generation).
  */
@@ -57,7 +58,7 @@ async function assertNotServedDomain(
   label: string,
 ) {
   if (!db || typeof email !== "string" || !email) return;
-  if (await isServedDomain(db, email)) {
+  if ((MAIL_DOMAIN && !isExternalRecovery(email, MAIL_DOMAIN)) || await isServedDomain(db, email)) {
     throw new APIError("BAD_REQUEST", {
       message: `${label} must be an external address, not on a domain this server hosts.`,
     });
@@ -84,8 +85,7 @@ function buildAuth(db?: DrizzleD1Database<typeof schema>, kv?: KVNamespace) {
     user: {
       modelName: "user",
       additionalFields: {
-        // Recovery email is only meaningful for mailbox (member) users; the
-        // external super-admin recovers via their external login email instead.
+        // Every account signs in with its domain email and recovers externally.
         recoveryEmail: { type: "string", required: false },
         recoveryEmailVerified: {
           type: "boolean",
@@ -110,12 +110,9 @@ function buildAuth(db?: DrizzleD1Database<typeof schema>, kv?: KVNamespace) {
       },
     },
     emailVerification: {
-      // Only the external super-admin verifies their primary email (it's a real
-      // external inbox). Mailbox users verify a recovery address instead: their
-      // primary email is an unreadable Doota inbox, so we never send here for them.
+      // Optional primary mailbox verification; account recovery always uses the
+      // separately verified external recovery address.
       sendVerificationEmail: async ({ user, url }) => {
-        // Superadmin primary-email verify: no specific org, so brand/send from
-        // any active domain (same rule as the reset link below).
         const from = db ? await senderAddress(db) : undefined;
         const mail = renderEmail("verify-email", { from, verifyLink: url });
         sendMailBackground({
@@ -128,7 +125,7 @@ function buildAuth(db?: DrizzleD1Database<typeof schema>, kv?: KVNamespace) {
       },
       autoSignInAfterVerification: false,
     },
-    appName: `Doota`,
+    appName: APP_NAME || "Cloudflare Mail Client",
     // ORIGINS entries are full origins (protocol included) — better-auth uses
     // them verbatim as trusted origins; the canonical first entry is the
     // fallback base URL when a request can't resolve one.
@@ -144,36 +141,15 @@ function buildAuth(db?: DrizzleD1Database<typeof schema>, kv?: KVNamespace) {
       disableSignUp: true,
       revokeSessionsOnPasswordReset: true,
       resetPasswordTokenExpiresIn: 60 * 10, // seconds
-      /**
-       * Reset target branches by role (spec invariant):
-       *   - external super-admin → their external login `user.email`
-       *   - mailbox/member user  → verified external `recoveryEmail`
-       * Never `user.email` for a member (that's the unreadable Doota inbox),
-       * and never a served-domain address for anyone. Silent no-op otherwise,
-       * so the endpoint's response stays generic and can't be used to enumerate.
-       */
-      sendResetPassword: async ({ user, url }) => {
+      // Invitations use the same expiring, single-use Better Auth reset token.
+      // An unverified recovery address is allowed only for initial account setup.
+      sendResetPassword: async ({ user, url, token }) => {
         const role = (user as typeof user & { role?: string | null }).role;
-        let to: string | null = null;
-
-        if (role === "superadmin") {
-          // Only once the super-admin has verified their external email (a
-          // deferred action, available after a domain has a working sending
-          // path). Until then recovery is the email-free CLI (reset-admin),
-          // never an unverified, possibly-undeliverable address.
-          const emailVerified = (
-            user as typeof user & { emailVerified?: boolean }
-          ).emailVerified;
-          if (emailVerified) to = user.email;
-        } else {
-          const { recoveryEmail, recoveryEmailVerified } = user as typeof user &
-            UserRecovery;
-          if (recoveryEmail && recoveryEmailVerified) to = recoveryEmail;
-        }
-
+        const recoveryUser = user as typeof user & UserRecovery & { mustChangePassword?: boolean };
+        const to = recoveryResetTarget(recoveryUser);
         if (!to) return;
         // Defence in depth: never send a reset link to a served-domain inbox.
-        if (db && (await isServedDomain(db, to))) return;
+        if ((MAIL_DOMAIN && !isExternalRecovery(to, MAIL_DOMAIN)) || (db && await isServedDomain(db, to))) return;
 
         // Brand from the user's own org domain (members) when it's active;
         // superadmin/system mail falls back to any active org domain.
@@ -181,7 +157,10 @@ function buildAuth(db?: DrizzleD1Database<typeof schema>, kv?: KVNamespace) {
           role === "superadmin" ? undefined : domainOf(user.email);
         const from = db ? await senderAddress(db, fromDomain) : undefined;
 
-        const mail = renderEmail("reset-link", { from, resetLink: url });
+        await rememberRecoveryReset(token, user.id, to);
+        const mail = recoveryUser.mustChangePassword
+          ? renderEmail("invite", { from, mailbox: user.email, setupLink: url })
+          : renderEmail("reset-link", { from, resetLink: url });
         sendMailBackground({
           to,
           from,
@@ -190,6 +169,23 @@ function buildAuth(db?: DrizzleD1Database<typeof schema>, kv?: KVNamespace) {
           html: mail.html,
         });
       },
+    },
+    hooks: {
+      before: createAuthMiddleware(async (ctx) => {
+        if (ctx.path !== "/reset-password") return;
+        const token = ctx.body?.token || ctx.query?.token;
+        if (typeof token !== "string" || !(await validRecoveryReset(token))) {
+          throw new APIError("BAD_REQUEST", { message: "Invalid or expired reset link." });
+        }
+      }),
+      after: createAuthMiddleware(async (ctx) => {
+        if (ctx.path !== "/reset-password") return;
+        const result = ctx.context.returned as { status?: boolean } | undefined;
+        const token = ctx.body?.token || ctx.query?.token;
+        if (result?.status === true && typeof token === "string") {
+          await completeRecoveryReset(token);
+        }
+      }),
     },
     databaseHooks: {
       user: {
@@ -200,7 +196,7 @@ function buildAuth(db?: DrizzleD1Database<typeof schema>, kv?: KVNamespace) {
               (user as UserRecovery).recoveryEmail,
               "Recovery email",
             );
-            // First user on a fresh deployment becomes the external superadmin.
+            // The bootstrap lock guarantees only one first administrator.
             const isFirst = db ? (await db.$count(schema.user)) === 0 : false;
             return {
               data: {
@@ -223,29 +219,6 @@ function buildAuth(db?: DrizzleD1Database<typeof schema>, kv?: KVNamespace) {
                 recoveryEmailVerifiedAt: null,
               },
             };
-          },
-        },
-      },
-      session: {
-        create: {
-          // A successful credential login proves the user controls the address
-          // the temp password was delivered to: their external recovery email
-          // (provisioning mails it there and nowhere else). So we verify the
-          // recovery address on first login instead of sending a separate
-          // confirmation link. Idempotent: once verified this is a no-op, and
-          // superadmins have no recoveryEmail so they're never touched.
-          after: async (session, context) => {
-            if (!db || !context) return;
-            const u = await db.query.user.findFirst({
-              where: eq(schema.user.id, session.userId),
-              columns: { recoveryEmail: true, recoveryEmailVerified: true },
-            });
-            if (u?.recoveryEmail && !u.recoveryEmailVerified) {
-              await context.context.internalAdapter.updateUser(session.userId, {
-                recoveryEmailVerified: true,
-                recoveryEmailVerifiedAt: Date.now(),
-              });
-            }
           },
         },
       },

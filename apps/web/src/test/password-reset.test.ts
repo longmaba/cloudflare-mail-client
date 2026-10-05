@@ -13,6 +13,7 @@ vi.mock("$lib/server/auth/escape-hatches.js", () => ({
 vi.mock("@doota/db/org-domains", () => ({
   senderAddress: vi.fn(async () => ({ name: "Doota", email: "no-reply@acme.com" })),
   domainOf: vi.fn((e: string) => e.split("@")[1]),
+  isServedDomain: vi.fn(async () => false),
 }));
 vi.mock("$lib/server/mailer.js", () => ({ sendMail: vi.fn() }));
 vi.mock("$lib/server/email.js", () => ({
@@ -26,8 +27,9 @@ import { sendMail } from "$lib/server/mailer.js";
 beforeEach(() => vi.clearAllMocks());
 
 describe("resetTarget (security invariant)", () => {
-  it("superadmin → their external login email", () => {
-    expect(resetTarget({ id: "1", email: "s@ext.com", role: "superadmin" })).toBe("s@ext.com");
+  it("superadmin uses verified external recovery, never the domain login", () => {
+    expect(resetTarget({ id: "1", email: "s@example.test", role: "superadmin", recoveryEmail: "r@ext.com", recoveryEmailVerified: true })).toBe("r@ext.com");
+    expect(resetTarget({ id: "1", email: "s@example.test", role: "superadmin" })).toBeNull();
   });
   it("member with VERIFIED recovery → the recovery email", () => {
     expect(
@@ -85,7 +87,7 @@ describe("sendPasswordResetCode", () => {
 
   it("throttled → not sent", async () => {
     vi.mocked(throttleAllows).mockResolvedValueOnce(false);
-    const res = await sendPasswordResetCode(db, { id: "1", email: "s@ext.com", role: "superadmin" });
+    const res = await sendPasswordResetCode(db, { id: "1", email: "s@example.test", role: "superadmin", recoveryEmail: "s@ext.com", recoveryEmailVerified: true });
     expect(res.ok).toBe(false);
     expect(res.message).toMatch(/wait a minute/i);
     expect(sendMail).not.toHaveBeenCalled();
@@ -93,7 +95,7 @@ describe("sendPasswordResetCode", () => {
 
   it("happy path issues one code and mails it (masked)", async () => {
     vi.mocked(throttleAllows).mockResolvedValueOnce(true);
-    const res = await sendPasswordResetCode(db, { id: "1", email: "super@ext.com", role: "superadmin" });
+    const res = await sendPasswordResetCode(db, { id: "1", email: "super@example.test", role: "superadmin", recoveryEmail: "super@ext.com", recoveryEmailVerified: true });
     expect(res.ok).toBe(true);
     // one active code per user: prior dropped, new issued
     expect(tokenStore.dropByIdentifier).toHaveBeenCalledWith("pwreset:1");

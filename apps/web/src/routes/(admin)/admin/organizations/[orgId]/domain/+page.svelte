@@ -13,9 +13,7 @@
 	import { toast } from 'svelte-sonner';
 	import * as Card from '$lib/components/ui/card/index.js';
 	import * as Table from '$lib/components/ui/table/index.js';
-	import * as AlertDialog from '$lib/components/ui/alert-dialog/index.js';
 	import { Button } from '$lib/components/ui/button/index.js';
-	import { Input } from '$lib/components/ui/input/index.js';
 	import { Switch } from '$lib/components/ui/switch/index.js';
 	import { Label } from '$lib/components/ui/label/index.js';
 	import { Spinner } from '$lib/components/ui/spinner/index.js';
@@ -25,14 +23,10 @@
 		refreshDomain,
 		domainDnsRecords,
 		mailRoutingConfig,
-		addMailSubdomain,
-		removeMailSubdomain,
 		toggleSubaddressing
 	} from '$lib/rpc/domains.remote.js';
 	import PageHeader from '$lib/components/admin/page-header.svelte';
 	import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
-	import PlusIcon from '@lucide/svelte/icons/plus';
-	import Trash2Icon from '@lucide/svelte/icons/trash-2';
 	import { errorMessage } from '$lib/utils/error-message';
 
 	let { data } = $props();
@@ -60,6 +54,7 @@
 	// --- Inbound routing (subdomains) -------------------------------------------
 	type Routing = {
 		enabled: boolean;
+		routingMode: string;
 		supportSubaddress: boolean;
 		status?: string;
 		subdomains: string[];
@@ -68,10 +63,7 @@
 	};
 	let routing = $state<Routing | null>(null);
 	let routingLoading = $state(false);
-	let subInput = $state('');
-	let addingSub = $state(false);
 	let subaddrBusy = $state(false);
-	let removingSub = $state<string | null>(null);
 
 	onMount(async () => {
 		if (org.zoneId) {
@@ -136,47 +128,12 @@
 		}
 	}
 
-	async function addSubdomain() {
-		const value = subInput.trim();
-		if (!value || !routing) return;
-		addingSub = true;
-		try {
-			const res = await addMailSubdomain({ orgId: org.id, subdomain: value });
-			if (!res.success) {
-				toast.error(res.message);
-				return;
-			}
-			if (!routing.subdomains.includes(res.subdomain)) {
-				routing.subdomains = [...routing.subdomains, res.subdomain].sort();
-			}
-			subInput = '';
-			toast.success(`Added ${res.subdomain}.`);
-		} catch (err) {
-			toast.error(errorMessage(err, 'Could not add subdomain.'));
-		} finally {
-			addingSub = false;
-		}
-	}
-
-	async function removeSubdomain(host: string) {
-		if (!routing) return;
-		removingSub = host;
-		try {
-			await removeMailSubdomain({ orgId: org.id, subdomain: host });
-			routing.subdomains = routing.subdomains.filter((subdomain) => subdomain !== host);
-			toast.success(`Removed ${host}.`);
-		} catch (err) {
-			toast.error(errorMessage(err, 'Could not remove subdomain.'));
-		} finally {
-			removingSub = null;
-		}
-	}
 </script>
 
 <div class="flex flex-col gap-4">
 	<PageHeader
 		title="Domain"
-		description="Mail routing status and DNS for {org.domain}, plus inbound subdomain routing and plus-addressing."
+		description="Mail routing status and DNS for {org.domain}, and the configured recipient routes."
 	/>
 
 	<!-- Mail routing / DNS -->
@@ -200,7 +157,7 @@
 				<div class="border-destructive/30 bg-destructive/5 space-y-2 rounded-lg border p-3">
 					<p class="text-sm font-medium">Inbound routing isn't attached</p>
 					<p class="text-muted-foreground text-xs">
-						Incoming mail for <span class="font-mono">{org.domain}</span> is not reaching Doota — the
+						Incoming mail for <span class="font-mono">{org.domain}</span> is not reaching the mail client — the
 						Email Routing catch-all isn't pointed at the mail worker. This usually means the domain
 						was onboarded before the worker was deployed. Reattach to fix it now.
 					</p>
@@ -275,7 +232,7 @@
 		<Card.CardHeader>
 			<Card.CardTitle class="font-heading">Inbound routing</Card.CardTitle>
 			<Card.CardDescription>
-				Route mail on subdomains of {org.domain} and control plus-addressing.
+				Mailboxes and aliases receive literal routes on {org.domain}.
 			</Card.CardDescription>
 		</Card.CardHeader>
 		<Card.CardContent class="space-y-6">
@@ -295,70 +252,14 @@
 							<code class="font-mono">you+tag@{org.domain}</code>, when matching routing rules.
 						</p>
 					</div>
-					<Switch id="subaddr" checked={routing.supportSubaddress} disabled={subaddrBusy} onCheckedChange={onToggleSubaddress} />
+					<Switch id="subaddr" checked={routing.supportSubaddress} disabled={subaddrBusy || routing.routingMode !== 'apex'} onCheckedChange={onToggleSubaddress} />
 				</div>
 
-				<div class="space-y-3">
-					<div class="space-y-0.5">
-						<p class="text-sm font-medium">Routing subdomains</p>
-						<p class="text-muted-foreground text-xs">
-							Each adds MX so <code class="font-mono">*@sub.{org.domain}</code> is delivered to your mailbox.
-						</p>
-					</div>
-
-					{#if routing.subdomains.length}
-						<ul class="divide-y rounded-lg border">
-							{#each routing.subdomains as host (host)}
-								<li class="flex items-center justify-between gap-2 px-3 py-2">
-									<code class="font-mono text-sm break-all">{host}</code>
-									<AlertDialog.Root>
-										<AlertDialog.Trigger>
-											{#snippet child({ props })}
-												<Button {...props} variant="ghost" size="icon" class="text-muted-foreground hover:text-destructive size-8" disabled={removingSub === host}>
-													{#if removingSub === host}<Spinner />{:else}<Trash2Icon class="size-4" />{/if}
-												</Button>
-											{/snippet}
-										</AlertDialog.Trigger>
-										<AlertDialog.Content>
-											<AlertDialog.Header>
-												<AlertDialog.Title>Remove {host}?</AlertDialog.Title>
-												<AlertDialog.Description>
-													This drops the MX record for <code class="font-mono">{host}</code>. Mail delivery to
-													<code class="font-mono">*@{host}</code> will stop immediately.
-												</AlertDialog.Description>
-											</AlertDialog.Header>
-											<AlertDialog.Footer>
-												<AlertDialog.Cancel disabled={removingSub === host}>Cancel</AlertDialog.Cancel>
-												<AlertDialog.Action
-													disabled={removingSub === host}
-													onclick={(event) => {
-														event.preventDefault();
-														removeSubdomain(host);
-													}}
-													class="bg-destructive text-white hover:bg-destructive/90"
-												>
-													{#if removingSub === host}<Spinner class="mr-1" />{/if}
-													Remove
-												</AlertDialog.Action>
-											</AlertDialog.Footer>
-										</AlertDialog.Content>
-									</AlertDialog.Root>
-								</li>
-							{/each}
-						</ul>
-					{:else}
-						<p class="text-muted-foreground text-sm">No subdomains configured.</p>
-					{/if}
-
-					<form class="flex items-center gap-2" onsubmit={(event) => { event.preventDefault(); addSubdomain(); }}>
-						<Input bind:value={subInput} placeholder="mail" class="max-w-xs" disabled={addingSub} aria-label="Subdomain label" />
-						<span class="text-muted-foreground text-sm">.{org.domain}</span>
-						<Button type="submit" size="sm" disabled={addingSub || !subInput.trim()}>
-							{#if addingSub}<Spinner class="mr-1" />{:else}<PlusIcon class="mr-1 size-3.5" />{/if}
-							Add
-						</Button>
-					</form>
-				</div>
+				<p class="text-muted-foreground text-sm">
+					This instance receives mail on <code class="font-mono">{org.domain}</code>.
+					Create mailboxes and aliases in the administrator pages to add their recipient routes.
+					{#if routing.routingMode !== 'apex'}Plus-addressing is unavailable during subdomain pilot setup.{/if}
+				</p>
 			{/if}
 		</Card.CardContent>
 	</Card.Card>

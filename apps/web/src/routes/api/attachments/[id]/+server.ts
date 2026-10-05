@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import { error, type RequestHandler } from "@sveltejs/kit";
-import { and, eq, inArray } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import * as schema from "@doota/db/schema";
-import { can } from "@doota/db/can";
-import { getAuthz } from "$lib/server/authz.js";
+import { canReadMessage } from "@doota/mail-core/message-access";
 import { renderETag, isNotModified, revalidateHeaders } from "$lib/server/render-cache.js";
 import { sanitizeFilename } from "$lib/utils/filename";
 import { verifyResourceToken } from "$lib/server/resource-token.js";
@@ -47,24 +46,7 @@ export const GET: RequestHandler = async ({ params, url, request, locals, platfo
   const user = locals.user;
   if (!allowed) {
     if (!user) error(401, "Not authenticated");
-    const { mailboxIds: myBoxes, orgAdminOf } = await getAuthz();
-    if (myBoxes.length) {
-      const del = await locals.db.query.delivery.findFirst({
-        where: and(
-          eq(schema.delivery.messageId, att.messageId),
-          inArray(schema.delivery.mailboxId, myBoxes),
-        ),
-        columns: { id: true },
-      });
-      allowed = !!del;
-    }
-    if (!allowed) {
-      allowed = can(
-        { id: user.id, role: user.role, orgAdminOf },
-        "read",
-        { type: "mailbox", ownerId: "", organizationId: message.orgId },
-      );
-    }
+    allowed = await canReadMessage(locals.db, { userId: user.id }, att.messageId, message.orgId);
     if (!allowed) error(403, "You can't access this attachment.");
   }
 

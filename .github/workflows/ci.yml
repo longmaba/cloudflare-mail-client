@@ -1,0 +1,36 @@
+name: Checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      MAIL_DOMAIN: example.test
+      MAIL_ROUTING_MODE: manual
+      ORIGINS: https://mail.example.test
+      SETUP_TOKEN: ci-build-placeholder-only
+      BETTER_AUTH_SECRET: ci-build-placeholder-secret-000000000000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.26.2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter doota gen
+      - run: pnpm run test:installer
+      - run: pnpm run check
+      - run: pnpm test
+      - run: pnpm run build
+      - run: pnpm -C infra install --frozen-lockfile
+      - run: pnpm -C infra run check

@@ -349,7 +349,7 @@
 		else unread.count = 0;
 	});
 	$effect(() => {
-		document.title = unread.count > 0 ? `(${unread.count}) Doota` : 'Doota';
+		document.title = unread.count > 0 ? `(${unread.count}) ${page.data.appName ?? 'Domain Mail'}` : page.data.appName ?? 'Domain Mail';
 	});
 
 	// Keep the open thread read: a reply landing while you're viewing it, or your

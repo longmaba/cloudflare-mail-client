@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { page } from '$app/state';
 	// SPDX-License-Identifier: Apache-2.0
 	import AtSignIcon from '@lucide/svelte/icons/at-sign';
 	import Lock from '@lucide/svelte/icons/lock';
@@ -20,7 +21,7 @@
     import InfoIcon from '@lucide/svelte/icons/info';
 
 	// The one-time SETUP_TOKEN, validated server-side before this page rendered.
-	let { token }: { token: string } = $props();
+	let { token, domain }: { token: string; domain: string } = $props();
 
 	let formState = $state({ isLoading: false });
 
@@ -77,13 +78,13 @@
 
 		<div class="w-full max-w-sm animate-in space-y-4">
 			<div class="flex flex-col space-y-1">
-				<h1 class="text-2xl font-bold tracking-wide">Doota</h1>
+				<h1 class="text-2xl font-bold tracking-wide">{page.data.appName ?? 'Domain Mail'}</h1>
 				<p class="text-base text-muted-foreground">
 					Create the super admin.
 				</p>
 				<Alert.Root class="mt-1">
                     <InfoIcon />
-                    <Alert.Title>You'll secure the account with 2FA or a passkey after logging in.</Alert.Title>
+                    <Alert.Title>You'll enroll authenticator two-factor authentication after logging in. Passkeys are optional.</Alert.Title>
 				</Alert.Root>
 			</div>
 
@@ -98,7 +99,7 @@
 						<Field.Field>
 							<Field.Label>Name</Field.Label>
 							<InputGroup>
-								<InputGroupInput placeholder="Shivam" {...fields.name.as('text')} type="text" autocomplete="name" />
+								<InputGroupInput placeholder="Your name" {...fields.name.as('text')} type="text" autocomplete="name" />
 								<InputGroupAddon align="inline-start">
 									<User />
 								</InputGroupAddon>
@@ -110,10 +111,10 @@
 							{/if}
 						</Field.Field>
 						<Field.Field>
-							<Field.Label>Email</Field.Label>
+							<Field.Label>Administrator domain email</Field.Label>
 							<InputGroup>
 								<InputGroupInput
-									placeholder="hello@email.com"
+									placeholder={`admin@${domain || 'yourdomain.com'}`}
 									{...fields.email.as('email')}
 									type="email"
 									inputmode="email"
@@ -130,9 +131,19 @@
 							{/if}
 							<Alert.Root>
                     <InfoIcon />
-                    <Alert.Title>Your email — used to log in and, once verified later, to recover
-								this account. Don't use an address hosted on this server.</Alert.Title>
+                    <Alert.Title>Your @{domain} address is your login and first mailbox.</Alert.Title>
 							</Alert.Root>
+						</Field.Field>
+						<Field.Field>
+							<Field.Label>External recovery email</Field.Label>
+							<InputGroup>
+								<InputGroupInput placeholder="you@example.com" {...fields.recoveryEmail.as('email')} type="email" inputmode="email" autocomplete="email" />
+								<InputGroupAddon align="inline-start"><AtSignIcon /></InputGroupAddon>
+							</InputGroup>
+							{#each fields.recoveryEmail.issues() ?? [] as issue (issue)}
+								<Field.Error>{issue.message}</Field.Error>
+							{/each}
+							<Field.Description>Required. Use an inbox outside your hosted domain for setup and password reset links.</Field.Description>
 						</Field.Field>
 						<Field.Field>
 							<Field.Label>Password</Field.Label>
