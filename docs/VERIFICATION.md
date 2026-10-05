@@ -11,7 +11,7 @@ On Windows with Node 24.12.0 and pnpm 10.26.2:
 | Frozen workspace and infrastructure installs | Passed |
 | Workspace type and Svelte checks | Passed, zero errors and warnings |
 | Application tests | 80 files, 843 tests passed |
-| Portable installer tests | 53 tests passed; migration, credential replacement and live API response coverage |
+| Portable installer tests | 71 tests passed; migration, credential replacement, live API responses and pre-upgrade restore points |
 | Infrastructure TypeScript check | Passed |
 | Production Cloudflare build | Passed |
 | Local D1 migrations | All migrations through `0058` applied |
@@ -96,7 +96,7 @@ Explicit named receiving activation for the pilot returned its exact domain,
 state. Cloudflare added the pilot MX/SPF records and its shared parent-zone
 Routing DKIM selector; existing provider records were preserved. Domain
 onboarding is complete, including verified external recovery and administrator
-TOTP. Real mail acceptance remains in progress.
+TOTP. The owner completed the live outgoing, reply and attachment test.
 
 The provider's five-record DNS preview includes quoted SPF and shared-parent
 Routing DKIM values. A live onboarding attempt exposed the old MX/SPF-only
@@ -123,11 +123,30 @@ receiving/sending records. The owner reports outgoing SPF, DKIM and DMARC pass.
 Read-only database checks confirm the delivered sender copy and received reply
 are stored. The complete browser mirror incorrectly hid Sent because it lacks
 sender delivery roles; Sent now retains the authorized server query and refreshes
-after compose and delivery updates. Live display acceptance is pending.
+after compose and delivery updates. After a hard refresh, the owner confirmed
+the original message appears in Sent without resending, the reply attachment
+opens, and mail to the existing apex address still arrives in Google. Outgoing
+SPF, DKIM and DMARC all passed in the external inbox's message details.
 After deploying this fix, a preserved real message's encrypted fields still
 decrypted to the original digest. All four current messages remain stored;
 the original database/resource identities and key fingerprint match the baseline.
 This is deployment preservation evidence, not a matched backup/restore test.
+
+The actual pilot database's SQL export failed because it contains FTS virtual
+tables. The upgrade prerequisite now saves a validated D1 Time Travel bookmark
+and exact private recovery metadata before checkout or migrations. A live
+read-only capture passed; malformed responses, provider failures and failed
+record writes block the upgrade. R2 and private-state/key backups remain separate.
+
+An isolated local data restore passed using a read-only snapshot of the pilot's
+56 logical tables, captured FTS rows, original SQLite sequence counters and 13
+triggers. Five referenced R2 objects were copied into an isolated filesystem.
+All four stored messages decrypted with restored keys, and the one attachment's
+decrypted bytes matched its original MIME part. Integrity, foreign keys, table
+row counts and ciphertext-copy hashes passed; source mail and schema remained
+unchanged. No live database restore, queue processing or email sending occurred.
+This tests captured mail data, not a complete bucket backup or operational
+restore of routing, authentication and external configuration.
 
 A read-only comparison against the original DNS snapshot confirmed all five
 Google apex MX records, the apex SPF record and three existing DKIM records
@@ -136,8 +155,8 @@ performed.
 
 Pending evidence includes a fresh real-account installation, independent
 account/domain installation, interrupted live deployment and upgrade preserving
-old mail, Sent display and received attachment opening, queue/storage faults,
-backup/restore and continued Google apex delivery. These are release gates for
+old mail, aliases and independent member access, queue/storage faults, and
+complete bucket backup/operational restore. These are release gates for
 production, not conclusions drawn from mocked tests.
 
 Inherited service-key sending has a separate consumer identity limitation;

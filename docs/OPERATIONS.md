@@ -11,8 +11,11 @@ resource list.
 Back up `.local/instance.json`, `.local/secrets.json`, the private Alchemy state,
 the D1 database and the entire R2 mail bucket as one instance. Include queue/job
 metadata in the D1 snapshot. Never rotate `MAIL_DEK` or `MAIL_SEARCH_KEY` during
-an upgrade. Use Cloudflare D1 exports/Time Travel and authenticated R2 object
-copies; record the snapshot time, resource IDs, release and key fingerprint.
+an upgrade. Use D1 Time Travel and authenticated R2 object copies; record the
+snapshot time, resource IDs, release and key fingerprint. Cloudflare's SQL
+export currently rejects databases containing FTS virtual tables, including
+this client's search tables. Do not drop live search tables to make an export
+work. See [D1 export limitations](https://developers.cloudflare.com/d1/best-practices/import-export-data/#known-limitations).
 
 Initial setup also keeps its resumable private wizard link in
 `.local/bootstrap.json`. Treat it as a credential; setup suppresses the link in
@@ -36,7 +39,23 @@ deployment error.
 Commit or stash local source changes. Run `pnpm run upgrade` and select a tagged
 release. The launcher keeps private instance state and stable keys, installs
 locked dependencies, builds and deploys through the same infrastructure stack.
-Database migrations may not be backward compatible: take a backup first. A
+Before checkout or migrations, the launcher saves a validated D1 Time Travel
+bookmark in a private `.local/before-upgrade-*.json` file. The record includes
+the exact database, instance, release transition and key fingerprint. Failure
+to capture or save the bookmark blocks the upgrade. Time Travel covers D1;
+keep matching R2 objects and private state/keys backed up independently. Its
+restore points expire after 30 days on Workers Paid, or 7 days on Free.
+[Time Travel documentation](https://developers.cloudflare.com/d1/reference/time-travel/)
+explains retention and recovery. A restore overwrites the live database, so
+pause ingress/consumption and review the matching snapshot before using it.
+
+Candidates before `v0.1.0-rc.3` use the unsupported SQL export prerequisite.
+If their upgrade command stops there, preserve `.local/` and private resource
+state, fetch the published compatible release, switch to it in a clean checkout
+and run `pnpm run setup`. This resumes the saved instance with its original
+resources and keys. Future upgrades use the restore-point path above.
+
+Database migrations may not be backward compatible: take a matched backup first. A
 source rollback does not undo a database migration. Restore a matched snapshot
 when a previous release requires the previous schema.
 

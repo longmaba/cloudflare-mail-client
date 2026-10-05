@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 import { randomUUID } from 'node:crypto';
-import { chmod } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { projectRoot, pnpm, run, validateTools, wrangler } from './lib/process.mjs';
-import { assertStable, atomicJson, deploymentEnv, keyFingerprint, newSecrets, readInstance, resourceNames, saveInstance, validateDomain, validateSlug, withInstallLock } from './lib/instance.mjs';
+import { assertStable, deploymentEnv, keyFingerprint, newSecrets, readInstance, resourceNames, saveInstance, validateDomain, validateSlug, withInstallLock } from './lib/instance.mjs';
 import { cloudflare, dnsPreview, dnsSnapshot, externalMx, selectAccountAndZone, workerSettings, assertRemoteIdentity, assertUnclaimedResources } from './lib/cloudflare.mjs';
 import { choose, maskedSecret, question } from './lib/prompt.mjs';
 import { inspectInstance } from './lib/doctor.mjs';
 import { assertUpgradeTarget } from './lib/upgrade.mjs';
+import { captureD1RestorePoint } from './lib/backup.mjs';
 import { presentBootstrap, saveBootstrapLink } from './lib/bootstrap.mjs';
 
 export const paidRequirement = 'Cloudflare Workers Paid is required: $5/month base, including 3,000 outbound emails each month. Additional email usage and usage above included compute/storage quotas are billed separately. Email Routing receiving alone is free; this mailbox uses paid native outbound sending.\n';
@@ -210,18 +210,14 @@ async function upgrade(args) {
   const transition = assertUpgradeTarget(instance.config, { sourceOrigin: await git(['remote', 'get-url', instance.config.sourceRemote]), dirty: false, current: await git(['rev-parse', 'HEAD']), target, publishedCommits: remoteCommits, manifest, isAncestor });
   // Verify the release still accepts the saved configuration before changing the checkout.
   await git(['cat-file', '-e', `${target}:scripts/lib/instance.mjs`]);
-  instance.config.phase = 'upgrading';
-  instance.config.upgrade = { tag, ...transition };
-  await saveInstance(projectRoot, instance.config, instance.secrets);
-  process.stdout.write('Backing up remote D1 before migrations; raw R2 and keys remain in place. Keep your separate R2 backup current.\n');
+  process.stdout.write('Saving a D1 Time Travel restore point before checkout or migrations. Keep independent R2 and .local private-state/key backups current; Time Travel covers D1 only and expires after 30 days on Workers Paid (7 days on Free).\n');
   const settings = await workerSettings(cloudflare(token), instance.config.accountId, instance.config.resourceNames.web);
-  const databaseId = settings?.bindings.find((binding) => binding.name === 'DB')?.id;
+  const databaseId = settings?.bindings?.find((binding) => binding.name === 'DB')?.id;
   if (!databaseId) throw new Error('Live database binding is missing. Restore it before upgrading; no migration was attempted.');
-  const backupConfigPath = join(projectRoot, '.local', 'backup-wrangler.json');
-  await atomicJson(backupConfigPath, { name: instance.config.resourceNames.web, account_id: instance.config.accountId, d1_databases: [{ binding: 'DB', database_name: instance.config.resourceNames.database, database_id: databaseId }] });
-  const backupPath = join(projectRoot, '.local', `before-upgrade-${Date.now()}.sql`);
-  await wrangler(['d1', 'export', 'DB', '--remote', '--config', backupConfigPath, '--output', backupPath], { env: deploymentEnv(instance.config, instance.secrets, token) });
-  await chmod(backupPath, 0o600);
+  const restorePoint = await captureD1RestorePoint(projectRoot, instance.config, instance.secrets, token, { databaseId, tag, ...transition });
+  instance.config.phase = 'upgrading';
+  instance.config.upgrade = { tag, ...transition, restorePoint };
+  await saveInstance(projectRoot, instance.config, instance.secrets);
   await git(['switch', '--detach', target]);
   // A release never receives a new config, stage, key or resource ID.
   await installDependencies();
