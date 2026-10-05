@@ -32,6 +32,15 @@ application tests and production builds on Windows, macOS and Linux. Its
 [current results](https://github.com/longmaba/cloudflare-mail-client/actions)
 are the authority for cross-platform CI status.
 
+For RC4 commit `5d7043a1a61de1d272114e93190b33aeece9f5e3`, Windows and macOS
+CI passed. The hosted Ubuntu job could not acquire a runner and was retried
+([run](https://github.com/longmaba/cloudflare-mail-client/actions/runs/37369219703)).
+An independent isolated Ubuntu 22.04 / WSL2 checkout of that exact commit passed
+all eight workflow commands using checksum-verified Node 24.12.0 and pnpm
+10.26.2: frozen installs, generation, 72 installer tests, zero-error checks,
+848 application tests, production build and infrastructure check. This proves
+native Linux execution; it does not claim the hosted Ubuntu job passed.
+
 Recovery tests also passed with Windows CRLF checkouts. An actual read-only
 local Wrangler D1 query confirmed that the recovery command preserves JSON
 output while disabling response logs; the focused recovery suite has five tests.
@@ -162,6 +171,16 @@ unchanged. No live database restore, queue processing or email sending occurred.
 This tests captured mail data, not a complete bucket backup or operational
 restore of routing, authentication and external configuration.
 
+The supported tagged upgrade from the published RC3 checkout to RC4 completed
+against the pilot. Its protected D1 Time Travel record matches the exact release
+transition, database and key fingerprint, and its in-progress state was cleared.
+All four pre-upgrade messages retain identical encrypted-field and decrypted
+content digests. All five referenced R2 ciphertext objects match the earlier
+recovery copy, including the attachment. The three Worker resource identities
+and mailbox-key fingerprints are unchanged, required doctor checks pass, and
+all six public pilot/apex DNS checks pass. No mail was resent. This proves one
+completed live release upgrade; interrupted live-upgrade recovery remains open.
+
 A read-only comparison against the original DNS snapshot confirmed all five
 Google apex MX records, the apex SPF record and three existing DKIM records
 unchanged. Apex DMARC was absent in both snapshots. No apex migration has been
@@ -169,7 +188,7 @@ performed.
 
 Pending evidence includes a fresh real-account installation, independent
 account/domain installation, interrupted live deployment and upgrade preserving
-old mail, real member/alias onboarding and delivery, queue/storage faults, and
+old mail after interruption, real member/alias onboarding and delivery, queue/storage faults, and
 complete bucket backup/operational restore. These are release gates for
 production, not conclusions drawn from mocked tests.
 
