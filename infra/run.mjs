@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 import { run } from '../scripts/lib/process.mjs';
 import { readInstance, deploymentEnv } from '../scripts/lib/instance.mjs';
 import { currentToken, guardDeployment } from '../scripts/instance.mjs';
+import { prepareMigrations } from '../scripts/lib/migrations.mjs';
 
 const infraRoot = dirname(fileURLToPath(import.meta.url));
 const manifest = JSON.parse(await readFile(join(infraRoot, 'node_modules/alchemy/package.json'), 'utf8'));
@@ -22,4 +23,6 @@ if (instance && ['deploy', 'plan'].includes(args[0])) {
   env = deploymentEnv(instance.config, instance.secrets, token);
 }
 if (instance && args[0] === 'destroy') throw new Error('Destroying a configured mailbox instance is blocked. Preserve its backups and use an explicit infrastructure decommission procedure.');
+// Always replace inherited paths: only fully prepared SQL reaches the supported CLI.
+env = { ...env, MAIL_INTERNAL_MIGRATIONS_DIR: await prepareMigrations(join(infraRoot, '..')) };
 await run(process.execPath, [join(infraRoot, 'node_modules/alchemy', bin), ...args], { cwd: infraRoot, env });

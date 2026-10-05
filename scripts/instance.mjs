@@ -40,7 +40,11 @@ export async function currentToken(secrets = {}, source) {
 }
 
 async function credentials(existing) {
-  if (existing) return { token: await currentToken(existing.secrets, existing.config.credentialSource), secrets: existing.secrets, credentialSource: existing.config.credentialSource };
+  if (existing) {
+    const token = await currentToken(existing.secrets, existing.config.credentialSource);
+    existing.secrets = await refreshedCredentials(existing.config, existing.secrets, token);
+    return { token, secrets: existing.secrets, credentialSource: existing.config.credentialSource };
+  }
   if (process.env.CLOUDFLARE_API_TOKEN) return { token: process.env.CLOUDFLARE_API_TOKEN, secrets: { deployToken: process.env.CLOUDFLARE_API_TOKEN }, credentialSource: 'token' };
   const source = await choose('Deploy credential', [{ label: 'Use existing Wrangler authenticated login', value: 'wrangler' }, { label: 'Sign in to Cloudflare in browser', value: 'login' }, { label: 'Enter a scoped Cloudflare API token (masked)', value: 'token' }]);
   if (source === 'login') await wrangler(['login']);
@@ -48,6 +52,18 @@ async function credentials(existing) {
   const token = await maskedSecret('CLOUDFLARE_API_TOKEN');
   if (!token) throw new Error('A deployment API token is required.');
   return { token, secrets: { deployToken: token }, credentialSource: 'token' };
+}
+
+export async function refreshedCredentials(config, secrets, deployToken, env = process.env, api = cloudflare(env.APP_CLOUDFLARE_API_TOKEN || secrets.runtimeToken)) {
+  const runtimeToken = env.APP_CLOUDFLARE_API_TOKEN || secrets.runtimeToken;
+  if (!runtimeToken || runtimeToken === deployToken) throw new Error('Use a separate runtime token scoped to this zone; never bind the deployment token into the app.');
+  if (runtimeToken !== secrets.runtimeToken) {
+    const zone = (await api(`/zones/${config.zoneId}`)).result;
+    if (zone.id !== config.zoneId || zone.account?.id !== config.accountId) throw new Error('Replacement runtime token does not match the saved account and zone.');
+    await api(`/zones/${config.zoneId}/dns_records?per_page=1`);
+    await api(`/zones/${config.zoneId}/email/routing`);
+  }
+  return { ...secrets, runtimeToken, ...(config.credentialSource === 'token' ? { deployToken } : {}) };
 }
 
 export function assertUpgradeTag(tag) {
@@ -131,7 +147,7 @@ async function setup() {
     await assertUnclaimedResources(config, api);
     instance = { config, secrets };
     const preview = dnsPreview(config, records);
-    process.stdout.write(`\nApp: ${appOrigin}\nMail: @${mailDomain}\nDeployment creates Workers, storage, queues and the app HTTPS hostname. Mail DNS is a separate deliberate onboarding step.\n${preview.planned.map((line) => `  ${line}`).join('\n')}\n${preview.apexUntouched ? `Apex ${zone.name} MX/SPF/DKIM/DMARC remain at the current provider.\n` : ''}`);
+    process.stdout.write(`\nApp: ${appOrigin}\nMail: @${mailDomain}\nDeployment creates Workers, storage, queues and the app HTTPS hostname. Mail DNS is a separate deliberate onboarding step.\n${preview.planned.map((line) => `  ${line}`).join('\n')}\n${preview.apexUntouched ? `Existing apex ${zone.name} MX/SPF/DKIM/DMARC records stay at the current provider. Cloudflare may add a separate shared Routing DKIM selector.\n` : ''}`);
     await saveInstance(projectRoot, config, secrets);
     process.stdout.write('Saved .local/instance.json and private .local/secrets.json. Back up both and the encryption keys before receiving real mail. On Windows, keep the checkout under your user-only filesystem ACL.\n');
   } else {

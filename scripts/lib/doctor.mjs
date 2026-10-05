@@ -35,7 +35,8 @@ async function inspectRecipientRouting(config, api) {
 async function inspectSendingDomain(config, api) {
   let domains;
   try { domains = await listAll(api, `/zones/${config.zoneId}/email/sending/subdomains`); } catch (error) {
-    throw new Error(`Could not inspect native Email Sending for ${config.mailDomain}${error.status ? ` (HTTP ${error.status})` : ''}. Check Email Sending Read/Edit permissions for the selected zone and Workers Paid entitlement, then rerun doctor. No send or configuration change was attempted.`);
+    if (error.code === 'MISSING_RUNTIME_TOKEN') throw error;
+    throw new Error(`Could not inspect native Email Sending for ${config.mailDomain}${error.status ? ` (HTTP ${error.status})` : ''}. Check runtime token Email Sending Read/Edit permissions for the selected account and Workers Paid entitlement, then rerun doctor. No send or configuration change was attempted.`);
   }
   const exact = domains.find((domain) => domain.name?.toLowerCase() === config.mailDomain);
   if (!exact) throw new Error(`Native Email Sending is not configured for exact domain ${config.mailDomain}. Onboard this domain in Email Service > Email Sending; an enabled apex, sibling or wildcard entry is not this instance's scoped sending identity.`);
@@ -43,10 +44,29 @@ async function inspectSendingDomain(config, api) {
   return { status: 'pass', detail: `Cloudflare reports exact domain ${config.mailDomain} sending-enabled. This API does not report separate DNS-verification/delivery state; DNS records and a real reply/header check are still required.` };
 }
 
-export async function inspectInstance(config, secrets, token, { api = cloudflare(token), fetcher = fetch } = {}) {
+export async function inspectInstance(config, secrets, token, { api, fetcher = fetch } = {}) {
+  // The injected API is a whole-inspector test adapter. Real HTTP requests use
+  // separate credentials: infrastructure uses deployment, mail setup uses runtime.
+  const runtimeRequest = cloudflare(secrets.runtimeToken, fetcher);
+  const configurationRequest = api ?? runtimeRequest;
+  api ??= cloudflare(token, fetcher);
+  const runtimeRead = async (request, path) => {
+    if (!secrets.runtimeToken) throw Object.assign(new Error('Missing runtime token. Supply a separate token scoped to this zone for DNS Edit, Zone Settings Edit, Email Routing Rules Edit and account Email Sending Edit. See docs/TOKENS.md.'), { code: 'MISSING_RUNTIME_TOKEN' });
+    try { return await request(path); } catch (error) {
+      const status = Number.isInteger(error.status) ? error.status : undefined;
+      const permission = path.includes('/email/sending') ? 'account Email Sending Read/Edit' : path.includes('/email/routing/rules') ? 'zone Email Routing Rules Read/Edit' : path.includes('/email/routing') ? 'Zone Settings Read/Edit' : path.includes('/dns_records') ? 'DNS Read/Edit' : 'Zone Read';
+      throw Object.assign(new Error(`Runtime token cannot inspect this configuration${status ? ` (HTTP ${status})` : ''}. Check ${permission} permissions for the selected account/zone and rerun doctor. See docs/TOKENS.md.`), { status });
+    }
+  };
+  const runtimeApi = (path) => runtimeRead(runtimeRequest, path);
+  const configurationApi = (path) => runtimeRead(configurationRequest, path);
   const checks = [];
   const check = async (name, action) => {
-    try { const result = await action(); checks.push({ name, ...result }); } catch (error) { checks.push({ name, status: 'fail', detail: error.message }); }
+    try { const result = await action(); checks.push({ name, ...result }); } catch (error) {
+      let detail = String(error.message ?? 'Diagnostic failed.');
+      for (const credential of [token, secrets.runtimeToken]) if (credential) detail = detail.replaceAll(credential, '[redacted]');
+      checks.push({ name, status: 'fail', detail });
+    }
   };
   await check('Selected account and zone', async () => {
     const zone = (await api(`/zones/${config.zoneId}`)).result;
@@ -54,15 +74,17 @@ export async function inspectInstance(config, secrets, token, { api = cloudflare
     return { status: zone.status === 'active' ? 'pass' : 'fail', detail: zone.status === 'active' ? `${zone.name} is active` : 'Activate the zone in Cloudflare before deployment.' };
   });
   await check('Runtime token scope', async () => {
-    if (!secrets.runtimeToken) throw new Error('Missing runtime token. Supply a separate token scoped to this zone for DNS Edit, Zone Settings Edit, Email Routing Rules Edit and Email Sending Edit. See docs/TOKENS.md.');
-    const runtimeApi = cloudflare(secrets.runtimeToken, fetcher);
     await runtimeApi(`/zones/${config.zoneId}`);
     await runtimeApi(`/zones/${config.zoneId}/dns_records?per_page=1`);
     await runtimeApi(`/zones/${config.zoneId}/email/routing`);
     return { status: 'pass', detail: 'Zone, DNS and routing reads allowed. Write permissions are exercised only by deliberate onboarding.' };
   });
   await check('Email Sending entitlement', async () => {
-    const subscriptions = (await api(`/accounts/${config.accountId}/subscriptions`)).result;
+    let subscriptions;
+    try { subscriptions = (await api(`/accounts/${config.accountId}/subscriptions`)).result; } catch (error) {
+      const status = Number.isInteger(error.status) ? ` (HTTP ${error.status})` : '';
+      return { status: 'warn', detail: `Workers Paid subscription could not be confirmed automatically${status}. Installer credentials intentionally omit billing access. Check Manage Account > Billing > Subscriptions and Email Service > Email Sending in the dashboard. Workers Paid ($5 base) is required; no additional Billing permission is needed for setup. Native sending-domain and DNS checks remain required.` };
+    }
     const paid = Array.isArray(subscriptions) && subscriptions.some((item) => /workers.*(?:paid|standard|bundled|unbound)|(?:paid|standard|bundled|unbound).*workers/i.test(JSON.stringify(item.rate_plan ?? item.plan ?? item.product ?? {})));
     return paid ? { status: 'pass', detail: 'Workers paid subscription reported; sending-domain readiness is checked separately.' } : { status: 'warn', detail: 'Workers Paid entitlement was not confirmed by the account API. Enable/check Workers Paid ($5 base) and Email Sending in the dashboard; receiving alone does not enable unrestricted outbound email.' };
   });
@@ -91,11 +113,11 @@ export async function inspectInstance(config, secrets, token, { api = cloudflare
     const dlq = queues.find((item) => item.queue_name === config.resourceNames.inboundDlq);
     if (!queue || !dlq) throw new Error('Inbound queue or DLQ missing. Resume setup for this saved instance.');
     const consumers = (await api(`/accounts/${config.accountId}/queues/${queue.queue_id}/consumers`)).result;
-    if (!consumers.some((item) => item.script_name === config.resourceNames.inbound && item.dead_letter_queue === config.resourceNames.inboundDlq)) throw new Error('Inbound consumer/DLQ wiring differs. Redeploy the saved stack.');
+    if (!consumers.some((item) => item.type === 'worker' && (item.script ?? item.script_name) === config.resourceNames.inbound && item.dead_letter_queue === config.resourceNames.inboundDlq)) throw new Error('Inbound consumer/DLQ wiring differs. Redeploy the saved stack.');
     return { status: 'pass', detail: 'Inbound consumer and DLQ configured; jobs Worker has replay binding. Fault/replay acceptance still requires the live pilot.' };
   });
-  await check('Recipient Email Routing', () => inspectRecipientRouting(config, api));
-  await check('Native sending domain', () => inspectSendingDomain(config, api));
+  await check('Recipient Email Routing', () => inspectRecipientRouting(config, configurationApi));
+  await check('Native sending domain', () => inspectSendingDomain(config, configurationApi));
   if (config.routingMode === 'manual') {
     await check('Pilot apex MX preservation', async () => {
       const records = await dnsSnapshot(api, config.zoneId);

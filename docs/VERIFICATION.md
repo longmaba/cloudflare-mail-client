@@ -1,6 +1,6 @@
 # Release verification
 
-Release candidate: `v0.1.0-rc.2`. Verification date: 2026-10-06.
+Release candidate: `v0.1.0-rc.3`. Verification date: 2026-10-06.
 
 ## Automated evidence
 
@@ -10,8 +10,8 @@ On Windows with Node 24.12.0 and pnpm 10.26.2:
 | --- | --- |
 | Frozen workspace and infrastructure installs | Passed |
 | Workspace type and Svelte checks | Passed, zero errors and warnings |
-| Application tests | 79 files, 739 tests passed |
-| Portable installer tests | 29 tests passed |
+| Application tests | 79 files, 761 tests passed |
+| Portable installer tests | 46 tests passed; migration, credential replacement and live API response coverage |
 | Infrastructure TypeScript check | Passed |
 | Production Cloudflare build | Passed |
 | Local D1 migrations | All migrations through `0058` applied |
@@ -71,10 +71,27 @@ recovery delivery or Cloudflare domain activation.
 
 Scoped deployment and runtime tokens passed read-only checks for the selected
 active zone, Workers, D1, KV, queues, DNS, routing settings, sending subdomains
-and sending limits. All five Google apex MX records were present. R2 returned
-HTTP 403 / code 10042 requesting account activation. No Cloudflare resources
-were deployed and no mail or DNS records were changed by this implementation
-session; live setup awaits R2 activation.
+and sending limits. R2 activation was completed and its API check passed.
+Initial infrastructure provisioning reached database migrations, where D1's
+HTTP API rejected a trigger migration with Windows CRLF line endings.
+Read-only `EXPLAIN CREATE TRIGGER` reproduced the error with CRLF and passed
+with LF. The launcher now prepares complete LF-only migration files while
+preserving source bytes, migration filenames, resources and mailbox keys.
+The live infrastructure deployment completed: all 59 migrations and 13 triggers
+are installed, the three Workers have matching ownership/key fingerprints,
+and the login page loads in a browser with no console errors. Replaced runtime
+and deployment credentials are saved; the mailbox keys remain stable.
+
+Explicit named receiving activation for the pilot returned its exact domain,
+`enabled: true` and `status: ready`. A repeated call returned the same ready
+state. Cloudflare added the pilot MX/SPF records and its shared parent-zone
+Routing DKIM selector; existing provider records were preserved. Domain
+onboarding, recovery/TOTP and real mail acceptance remain in progress.
+
+A read-only comparison against the original DNS snapshot confirmed all five
+Google apex MX records, the apex SPF record and three existing DKIM records
+unchanged. Apex DMARC was absent in both snapshots. No apex migration or real
+mail test has been performed.
 
 Pending evidence includes a fresh real-account installation, independent
 account/domain installation, interrupted live deployment and upgrade preserving

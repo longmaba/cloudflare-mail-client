@@ -22,6 +22,9 @@ this historical public snapshot is not a complete zone backup.
 1. Run setup against the existing account and zone, using the pilot domain.
 2. Review the subdomain DNS preview. Leave apex MX/SPF and Google verification
    records intact. The web hostname adds its own application DNS binding.
+   Named receiving activation adds pilot MX/SPF records and may add Cloudflare's
+   shared Routing DKIM selector at the parent zone. Existing provider DKIM and
+   DMARC records are checked and preserved; this is not an apex MX migration.
 3. Complete protected administrator setup using a pilot-domain login and an
    external recovery address; enroll TOTP.
 4. Run doctor and the real mail acceptance steps in OPERATIONS.md.

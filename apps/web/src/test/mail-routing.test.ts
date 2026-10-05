@@ -17,7 +17,7 @@ const fixture = vi.hoisted(() => {
 vi.mock('$app/env/private', () => fixture.env);
 vi.mock('cloudflare', () => ({ default: class { constructor() { return fixture.api; } } }));
 
-import { createRoutingRule, getRoutingConfig, wireMail } from '../lib/server/cloudflare.js';
+import { createRoutingRule, enablePilotEmailRouting, getRoutingConfig, wireMail } from '../lib/server/cloudflare.js';
 import { setRecipientRouting } from '../lib/server/mail-routing.js';
 
 type Dns = { id: string; type: string; name: string; content: string; priority?: number; ttl?: number };
@@ -25,7 +25,8 @@ const apex: Dns[] = [
   { id: 'google', type: 'MX', name: 'example.com', content: 'aspmx.l.google.com', priority: 1 },
   { id: 'spf-apex', type: 'TXT', name: 'example.com', content: 'v=spf1 include:_spf.google.com include:zoho.com ~all' },
   { id: 'dmarc-apex', type: 'TXT', name: '_dmarc.example.com', content: 'v=DMARC1; p=reject' },
-  { id: 'dkim-apex', type: 'TXT', name: 'google._domainkey.example.com', content: 'v=DKIM1; p=old-key' }
+  { id: 'dkim-apex', type: 'TXT', name: 'google._domainkey.example.com', content: 'v=DKIM1; p=old-key' },
+  { id: 'dkim-cname-apex', type: 'CNAME', name: 'zoho._domainkey.example.com', content: 'zoho-key.provider.test' }
 ];
 let records: Dns[];
 const expected = [
@@ -55,6 +56,7 @@ beforeEach(() => {
     return records.at(-1);
   });
   fixture.api.emailRouting.dns.get.mockResolvedValue({ success: true, result: expected });
+  fixture.api.emailRouting.dns.create.mockResolvedValue({ name: 'pilot.example.com', enabled: true, status: 'ready' });
   fixture.api.emailRouting.get.mockResolvedValue({ enabled: true, status: 'ready' });
   fixture.api.emailRouting.rules.catchAlls.get.mockResolvedValue({ enabled: false, actions: [] });
   fixture.api.emailSending.subdomains.create.mockResolvedValue({ return_path_domain: 'cf-bounce.pilot.example.com' });
@@ -65,7 +67,7 @@ describe('scoped DNS wiring', () => {
   it('creates only pilot MX/SPF and monitor DMARC, preserves every apex record, and resumes without duplicate DNS writes', async () => {
     await wireMail('zone', 'mail-in-pilot', 'pilot.example.com');
     expect(fixture.api.emailRouting.dns.get).toHaveBeenCalledWith({ zone_id: 'zone' });
-    expect(fixture.api.emailRouting.dns.create).not.toHaveBeenCalled();
+    expect(fixture.api.emailRouting.dns.create).toHaveBeenCalledWith({ zone_id: 'zone', name: 'pilot.example.com' });
     expect(fixture.api.emailRouting.enable).not.toHaveBeenCalled();
     expect(fixture.api.emailRouting.rules.catchAlls.update).not.toHaveBeenCalled();
     expect(fixture.api.dns.records.create.mock.calls.map(([r]) => r.name)).toEqual([
@@ -75,6 +77,7 @@ describe('scoped DNS wiring', () => {
     expect(records.slice(0, apex.length)).toEqual(apex);
     await wireMail('zone', 'mail-in-pilot', 'pilot.example.com');
     expect(fixture.api.dns.records.create).toHaveBeenCalledTimes(4);
+    expect(fixture.api.emailRouting.dns.create).toHaveBeenCalledTimes(2);
     expect(fixture.api.dns.records.update).not.toHaveBeenCalled();
     expect(fixture.api.dns.records.delete).not.toHaveBeenCalled();
   });
@@ -167,6 +170,97 @@ describe('scoped DNS wiring', () => {
   it('does not expose native bounce MX as a selectable mail subdomain', async () => {
     records.push({ id: 'bounce', type: 'MX', name: 'cf-bounce.pilot.example.com', content: 'route1.mx.cloudflare.net' });
     expect((await getRoutingConfig('zone', 'pilot.example.com')).subdomains).toEqual([]);
+  });
+});
+
+describe('explicit pilot routing activation', () => {
+  it('serializes the full pilot name in the SDK request body', async () => {
+    const { default: ActualCloudflare } = await vi.importActual<typeof import('cloudflare')>('cloudflare');
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ success: true, result: {
+      id: 'routing', name: 'pilot.example.com', enabled: true, status: 'ready'
+    } }), { headers: { 'content-type': 'application/json' } }));
+    const client = new ActualCloudflare({ apiToken: 'fixture-only-token', fetch: fetcher });
+    await client.emailRouting.dns.create({ zone_id: 'zone', name: 'pilot.example.com' });
+    const request = fetcher.mock.calls[0] as unknown as [string, RequestInit];
+    expect(new URL(request[0]).pathname).toBe('/client/v4/zones/zone/email/routing/dns');
+    expect(request[1].method).toBe('POST');
+    expect(JSON.parse(request[1].body as string)).toEqual({ name: 'pilot.example.com' });
+  });
+
+  it.each(['', ' ', 'example.com', 'other.example.com', 'pilot.foreign.test', 'pilot.badexample.com'])
+    ('rejects an absent, apex or unselected activation name before writes (%j)', async (name) => {
+      await expect(enablePilotEmailRouting('zone', name)).rejects.toThrow();
+      expect(fixture.api.emailRouting.dns.create).not.toHaveBeenCalled();
+      expect(fixture.api.dns.records.create).not.toHaveBeenCalled();
+      expect(fixture.api.emailRouting.enable).not.toHaveBeenCalled();
+      expect(fixture.api.emailRouting.rules.catchAlls.update).not.toHaveBeenCalled();
+    });
+
+  it('rejects the apex even when explicitly configured for migration', async () => {
+    fixture.env.MAIL_DOMAIN = 'example.com';
+    fixture.env.MAIL_ROUTING_MODE = 'apex';
+    await expect(enablePilotEmailRouting('zone', 'example.com')).rejects.toThrow(/subdomain/i);
+    expect(fixture.api.emailRouting.dns.create).not.toHaveBeenCalled();
+  });
+
+  it('rejects a configured domain outside the selected zone', async () => {
+    fixture.env.MAIL_DOMAIN = 'pilot.foreign.test';
+    await expect(enablePilotEmailRouting('zone', 'pilot.foreign.test')).rejects.toThrow(/outside/i);
+    expect(fixture.api.emailRouting.dns.create).not.toHaveBeenCalled();
+  });
+
+  it.each([409, 422])('does not swallow routing activation HTTP %s', async status => {
+    fixture.api.emailRouting.dns.create.mockRejectedValue({ status });
+    await expect(wireMail('zone', 'mail-in-pilot', 'pilot.example.com')).rejects.toMatchObject({ status });
+    expect(fixture.api.emailSending.subdomains.create).not.toHaveBeenCalled();
+    expect(records.slice(0, apex.length)).toEqual(apex);
+  });
+
+  it.each([
+    { name: 'example.com', enabled: true, status: 'ready' },
+    { name: 'pilot.example.com', enabled: false, status: 'ready' },
+    { name: 'pilot.example.com', enabled: true, status: 'misconfigured' },
+    undefined
+  ])('does not claim activation without scoped server confirmation (%j)', async result => {
+    fixture.api.emailRouting.dns.create.mockResolvedValue(result);
+    await expect(wireMail('zone', 'mail-in-pilot', 'pilot.example.com')).rejects.toThrow(/confirm.*pilot/i);
+    expect(fixture.api.emailSending.subdomains.create).not.toHaveBeenCalled();
+  });
+
+  it.each(['google', 'spf-apex', 'dmarc-apex', 'dkim-apex', 'dkim-cname-apex'])
+    ('blocks sending onboarding when activation changes protected apex record %s', async id => {
+      fixture.api.emailRouting.dns.create.mockImplementation(async () => {
+        records.find(record => record.id === id)!.content = 'unexpected-provider-change';
+        return { name: 'pilot.example.com', enabled: true, status: 'ready' };
+      });
+      await expect(wireMail('zone', 'mail-in-pilot', 'pilot.example.com')).rejects.toThrow(/apex.*changed/i);
+      expect(fixture.api.emailSending.subdomains.create).not.toHaveBeenCalled();
+      expect(fixture.api.dns.records.update).not.toHaveBeenCalled();
+      expect(fixture.api.dns.records.delete).not.toHaveBeenCalled();
+    });
+
+  it('permits a new Cloudflare parent DKIM selector while preserving all preexisting provider records', async () => {
+    fixture.api.emailRouting.dns.create.mockImplementation(async () => {
+      if (!records.some(record => record.id === 'new-routing-dkim')) records.push({
+        id: 'new-routing-dkim', type: 'TXT', name: 'cf2024-1._domainkey.example.com', content: 'v=DKIM1; p=fixture'
+      });
+      return { name: 'pilot.example.com', enabled: true, status: 'ready' };
+    });
+    await wireMail('zone', 'mail-in-pilot', 'pilot.example.com');
+    expect(records.slice(0, apex.length)).toEqual(apex);
+    await wireMail('zone', 'mail-in-pilot', 'pilot.example.com');
+    expect(records.slice(0, apex.length)).toEqual(apex);
+    expect(fixture.api.emailRouting.dns.create.mock.calls.every(([params]) => params.name === 'pilot.example.com')).toBe(true);
+    expect(fixture.api.emailRouting.rules.catchAlls.update).not.toHaveBeenCalled();
+  });
+
+  it('rejects an additional apex MX instead of accepting enrollment success', async () => {
+    fixture.api.emailRouting.dns.create.mockImplementation(async () => {
+      records.push({ id: 'unexpected-apex-mx', type: 'MX', name: 'example.com', content: 'route1.mx.cloudflare.net' });
+      return { name: 'pilot.example.com', enabled: true, status: 'ready' };
+    });
+    await expect(wireMail('zone', 'mail-in-pilot', 'pilot.example.com')).rejects.toThrow(/apex.*changed/i);
+    expect(fixture.api.emailSending.subdomains.create).not.toHaveBeenCalled();
   });
 });
 

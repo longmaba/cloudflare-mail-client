@@ -1,0 +1,2 @@
+# D1's HTTP SQL parser requires LF line endings for complete trigger bodies.
+*.sql text eol=lf

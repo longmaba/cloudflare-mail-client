@@ -4,6 +4,7 @@ import * as Cloudflare from "alchemy/Cloudflare";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
+import { isAbsolute } from "node:path";
 // Importing ./env.ts loads infra/.env and validates the VAPID pair.
 import { aliasDomains, canonicalDomain, optionalSecret, optionalVar, originsValue } from "./env.ts";
 import { hexToBase64, stateSecret, VapidKeyPair, VapidKeyPairProvider } from "./secrets.ts";
@@ -53,9 +54,13 @@ export default Alchemy.Stack(
     const named = (baseName: string) => `${baseName}-${stageSuffix}`;
 
     // ── Shared resources (fresh per stage, not the bare manual names) ──
+    const migrationsDir = process.env.MAIL_INTERNAL_MIGRATIONS_DIR;
+    if (!migrationsDir || !isAbsolute(migrationsDir)) {
+      throw new Error("Prepared SQL migrations are required. Use pnpm -C infra run plan/deploy through run.mjs.");
+    }
     const database = yield* Cloudflare.D1.Database("Database", {
       name: named("doota"),
-      migrationsDir: "../drizzle",
+      migrationsDir,
     });
     const authKv = yield* Cloudflare.KV.Namespace("AuthKv", { title: named("AUTH_KV") });
     const mailRawBucket = yield* Cloudflare.R2.Bucket("MailRaw", { name: named("doota-mail-raw") });

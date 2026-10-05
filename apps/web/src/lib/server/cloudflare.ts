@@ -211,6 +211,54 @@ export async function enableEmailRouting(zoneId: string): Promise<void> {
   await cf().emailRouting.dns.create({ zone_id: zoneId });
 }
 
+/** Register only the configured pilot. Omitting name would activate apex routing. */
+export async function enablePilotEmailRouting(zoneId: string, domain: string): Promise<void> {
+  if (typeof domain !== 'string' || !domain || domain !== MAIL_DOMAIN) {
+    throw new MailSetupError('Pilot routing requires the exact configured mail subdomain.');
+  }
+  const zone = await pollZoneStatus(zoneId);
+  assertMailScope(domain, zone.name, MAIL_DOMAIN ?? '', MAIL_ROUTING_MODE ?? 'manual');
+  const prefix = domain.endsWith(`.${zone.name}`) ? domain.slice(0, -zone.name.length - 1) : '';
+  if (!prefix || prefix.split('.').some(label => !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) {
+    throw new MailSetupError('Pilot routing activation requires a strict subdomain of the selected zone.');
+  }
+  if (zone.status !== 'active') throw new MailSetupError('The selected Cloudflare zone is not active.');
+  const before = await protectedApexDns(zoneId, zone.name);
+  let result;
+  try {
+    // DNS records alone do not enroll a domain in Email Routing. Always name the
+    // selected subdomain; conflicts must propagate rather than imply enrollment.
+    result = await cf().emailRouting.dns.create({ zone_id: zoneId, name: domain });
+  } finally {
+    if (before.state !== (await protectedApexDns(zoneId, zone.name, before.dkimNames)).state) {
+      throw new MailSetupError('Protected apex mail DNS changed during pilot activation. Review the saved provider records before continuing.');
+    }
+  }
+  if (result?.name !== domain || !result.enabled || result.status !== 'ready') {
+    throw new MailSetupError('Cloudflare did not confirm ready routing for the configured pilot subdomain. Review its Email Routing settings and retry.');
+  }
+}
+
+async function protectedApexDns(zoneId: string, zone: string, existingDkim?: ReadonlySet<string>) {
+  const records = [];
+  const dkimNames = new Set<string>();
+  for await (const record of cf().dns.records.list({ zone_id: zoneId, per_page: 100 })) {
+    const name = dnsContent(record.name);
+    const dkim = ['TXT', 'CNAME'].includes(record.type) &&
+      (name === `_domainkey.${zone}` || name.endsWith(`._domainkey.${zone}`));
+    if ((record.type === 'MX' && name === zone) ||
+        (record.type === 'TXT' && name === zone && /^\s*"?v=spf1(?:\s|$)/i.test(record.content ?? '')) ||
+        (record.type === 'TXT' && name === `_dmarc.${zone}`) ||
+        (dkim && (!existingDkim || existingDkim.has(name)))) {
+      if (dkim) dkimNames.add(name);
+      const typed = record as { priority?: number; proxied?: boolean };
+      records.push({ id: record.id, type: record.type, name, content: record.content, ttl: record.ttl,
+        priority: typed.priority ?? null, proxied: typed.proxied ?? false });
+    }
+  }
+  return { state: JSON.stringify(records.sort((first, second) => first.id.localeCompare(second.id))), dkimNames };
+}
+
 /**
  * Read the supported zone DNS preview, then provision only the selected host.
  * The preview's deprecated `subdomain` query has an undocumented response shape,
@@ -771,8 +819,10 @@ export async function wireMail(
     await enableEmailRouting(zoneId);
     await createRoutingRule(zoneId, mailInWorkerName);
   } else {
-    // Never enable zone-wide routing here: that endpoint can replace apex MX.
+    // Preflight existing policies before scoped routing enrollment. Never omit
+    // the pilot name or attach an apex catch-all on this branch.
     await writeDnsRecords(zoneId, domain);
+    await enablePilotEmailRouting(zoneId, domain);
   }
   return onboardSendingDomain(zoneId, domain);
 }

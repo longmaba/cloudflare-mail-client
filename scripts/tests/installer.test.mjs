@@ -202,7 +202,7 @@ test('doctor is read-only and does not claim real mail delivery or write-permiss
     if (path.includes('/email/sending/subdomains?')) return { result: [{ enabled: true, name: config.mailDomain }] };
     if (path.includes('/workers/scripts/')) return { result: { bindings: [...identityBindings(config), ...['DB', 'AUTH_KV', 'MAIL_RAW', 'MAIL_QUEUE', 'MAIL_OUT_QUEUE', 'MAIL_EVENTS', 'EMAIL_SENDER', 'APP_CLOUDFLARE_API_TOKEN'].map((name) => ({ name, id: name === 'DB' ? 'db-id' : undefined }))] } };
     if (path.includes('/d1/database/db-id')) return { result: { name: config.resourceNames.database } };
-    if (path.includes('/queues/inbound-id/consumers')) return { result: [{ script_name: config.resourceNames.inbound, dead_letter_queue: config.resourceNames.inboundDlq }] };
+    if (path.includes('/queues/inbound-id/consumers')) return { result: [{ type: 'worker', script_name: config.resourceNames.inbound, dead_letter_queue: config.resourceNames.inboundDlq }] };
     if (path.includes('/queues?')) return { result: [{ queue_name: config.resourceNames.inboundQueue, queue_id: 'inbound-id' }, { queue_name: config.resourceNames.inboundDlq, queue_id: 'dlq-id' }] };
     if (path.includes('/dns_records')) return { result: [{ type: 'MX', name: 'example.com', content: 'aspmx.l.google.com', priority: 1 }, { type: 'MX', name: 'pilot.example.com', content: 'route1.mx.cloudflare.net' }, { type: 'TXT', name: 'pilot.example.com', content: 'v=spf1 include:_spf.mx.cloudflare.net ~all' }, ...['cf-bounce.pilot.example.com', 'cf-bounce._domainkey.pilot.example.com', '_dmarc.pilot.example.com'].map((name) => ({ name }))] };
     return { result: {} };

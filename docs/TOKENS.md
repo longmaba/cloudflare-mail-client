@@ -64,3 +64,17 @@ use a directory whose filesystem ACL permits your user, SYSTEM and trusted
 administrators only. Git ignore rules do not restrict local filesystem access.
 Rerun setup after fixing permission or account-activation errors. Never use a
 Global API Key or place credentials in a commit, issue, screenshot or chat.
+
+## Replace tokens without changing mailbox keys
+
+At My Profile > API Tokens, use the token's **⋯ > Roll > Confirm** action to
+replace its secret while retaining its permissions. The previous secret stops
+working. See [Cloudflare's rolling guide](https://developers.cloudflare.com/fundamentals/api/how-to/roll-token/).
+
+Supply the replacement deployment and runtime tokens through
+`CLOUDFLARE_API_TOKEN` and `APP_CLOUDFLARE_API_TOKEN`, then rerun `pnpm run setup`.
+Setup checks the replacement runtime token against the saved account and zone,
+updates the stored credentials and redeploys the runtime binding. For an
+assisted deployment, update the same two fields in `.local/credentials.json`.
+Keep `.local/instance.json` and the encryption/authentication keys in
+`.local/secrets.json`; token replacement does not require new mailbox keys.

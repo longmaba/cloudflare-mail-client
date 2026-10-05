@@ -48,7 +48,7 @@ export function externalMx(records, domain) {
 export function dnsPreview(config, records) {
   const domain = config.mailDomain;
   const relevant = records.filter((record) => [config.zoneName, domain, `cf-bounce.${domain}`, `_dmarc.${domain}`, `cf-bounce._domainkey.${domain}`, `cf2024-1._domainkey.${domain}`].includes(record.name));
-  return { current: relevant.map(({ type, name, content, priority, ttl }) => ({ type, name, content, priority, ttl })), planned: [`Routing MX on ${domain} -> Cloudflare routing MX (priorities supplied by Cloudflare)`, `One merged SPF TXT on ${domain}; preserve existing senders`, `Sending MX/SPF on cf-bounce.${domain}`, `Sending DKIM on cf-bounce._domainkey.${domain}`, `DMARC on _dmarc.${domain}; preserve existing policy, otherwise monitor first`, `Literal mailbox and alias rules on ${domain} -> ${config.resourceNames.inbound}`], apexUntouched: config.routingMode === 'manual' };
+  return { current: relevant.map(({ type, name, content, priority, ttl }) => ({ type, name, content, priority, ttl })), planned: [`Routing MX on ${domain} -> Cloudflare routing MX (priorities supplied by Cloudflare)`, `One merged SPF TXT on ${domain}; preserve existing senders`, `Cloudflare may add its shared Email Routing DKIM selector at ${config.zoneName}; existing provider DKIM stays intact`, `Sending MX/SPF on cf-bounce.${domain}`, `Sending DKIM on cf-bounce._domainkey.${domain}`, `DMARC on _dmarc.${domain}; preserve existing policy, otherwise monitor first`, `Literal mailbox and alias rules on ${domain} -> ${config.resourceNames.inbound}`], apexUntouched: config.routingMode === 'manual' };
 }
 
 export async function workerSettings(api, accountId, name) {
