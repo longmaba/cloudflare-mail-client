@@ -9,7 +9,7 @@ const fixture = vi.hoisted(() => {
     dns: { records: { list: vi.fn(), create: vi.fn(), update: vi.fn(), delete: vi.fn() } },
     emailRouting: { get: vi.fn(), enable: vi.fn(), dns: { get: vi.fn(), create: vi.fn() },
       rules: { create: vi.fn(), update: vi.fn(), catchAlls: { get: vi.fn(), update: vi.fn() } } },
-    emailSending: { subdomains: { create: vi.fn() } },
+    emailSending: { subdomains: { create: vi.fn(), list: vi.fn(), dns: { get: vi.fn() } } },
     get: vi.fn()
   };
   return { env, api };
@@ -17,7 +17,7 @@ const fixture = vi.hoisted(() => {
 vi.mock('$app/env/private', () => fixture.env);
 vi.mock('cloudflare', () => ({ default: class { constructor() { return fixture.api; } } }));
 
-import { createRoutingRule, enablePilotEmailRouting, getRoutingConfig, wireMail } from '../lib/server/cloudflare.js';
+import { createRoutingRule, enablePilotEmailRouting, getRoutingConfig, onboardSendingDomain, wireMail } from '../lib/server/cloudflare.js';
 import { setRecipientRouting } from '../lib/server/mail-routing.js';
 
 type Dns = { id: string; type: string; name: string; content: string; priority?: number; ttl?: number };
@@ -34,6 +34,17 @@ const expected = [
   { type: 'MX', name: 'example.com', content: 'route2.mx.cloudflare.net', priority: 25, ttl: 1 },
   { type: 'TXT', name: 'example.com', content: 'v=spf1 include:_spf.mx.cloudflare.net ~all', ttl: 1 }
 ];
+const sendingExpected = [
+  { type: 'MX', name: 'cf-bounce.pilot.example.com', content: 'route1.mx.cloudflare.net', priority: 24, ttl: 1 },
+  { type: 'MX', name: 'cf-bounce.pilot.example.com', content: 'route2.mx.cloudflare.net', priority: 44, ttl: 1 },
+  { type: 'MX', name: 'cf-bounce.pilot.example.com', content: 'route3.mx.cloudflare.net', priority: 27, ttl: 1 },
+  { type: 'TXT', name: 'cf-bounce.pilot.example.com', content: '"v=spf1 include:_spf.mx.cloudflare.net ~all"', ttl: 1 },
+  { type: 'TXT', name: 'cf-bounce._domainkey.pilot.example.com', content: `"v=DKIM1; h=sha256; k=rsa; p=${'A'.repeat(392)}"`, ttl: 1 },
+  { type: 'TXT', name: '_dmarc.pilot.example.com', content: '"v=DMARC1; p=reject;"', ttl: 1 }
+];
+const sendingIdentity = { name: 'pilot.example.com', enabled: true, tag: 'a'.repeat(32),
+  dkim_selector: 'cf-bounce', return_path_domain: 'cf-bounce.pilot.example.com' };
+const alreadySending = { status: 409, error: { errors: [{ code: 2040 }] } };
 function rule(overrides = {}) {
   return { id: 'owned', name: 'cloudflare-mail-client:owner@pilot.example.com', enabled: true,
     matchers: [{ type: 'literal', field: 'to', value: 'owner@pilot.example.com' }],
@@ -44,7 +55,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   fixture.env.MAIL_DOMAIN = 'pilot.example.com';
   fixture.env.MAIL_ROUTING_MODE = 'manual';
-  records = structuredClone(apex);
+  records = [...structuredClone(apex), ...sendingExpected.slice(0, 5).map((record, index) => ({ id: `sending-${index}`, ...record }))];
   fixture.api.zones.get.mockResolvedValue({ id: 'zone', name: 'example.com', status: 'active', account: { id: 'account' } });
   fixture.api.dns.records.list.mockImplementation((params) => ({
     async *[Symbol.asyncIterator]() {
@@ -59,7 +70,12 @@ beforeEach(() => {
   fixture.api.emailRouting.dns.create.mockResolvedValue({ name: 'pilot.example.com', enabled: true, status: 'ready' });
   fixture.api.emailRouting.get.mockResolvedValue({ enabled: true, status: 'ready' });
   fixture.api.emailRouting.rules.catchAlls.get.mockResolvedValue({ enabled: false, actions: [] });
-  fixture.api.emailSending.subdomains.create.mockResolvedValue({ return_path_domain: 'cf-bounce.pilot.example.com' });
+  fixture.api.emailSending.subdomains.create.mockImplementation(async ({ name }) => ({ name, enabled: true,
+    tag: 'a'.repeat(32), dkim_selector: 'cf-bounce', return_path_domain: `cf-bounce.${name}` }));
+  fixture.api.emailSending.subdomains.list.mockImplementation(() => ({ async *[Symbol.asyncIterator]() { yield sendingIdentity; } }));
+  fixture.api.emailSending.subdomains.dns.get.mockImplementation(() => ({ async *[Symbol.asyncIterator]() {
+    yield* sendingExpected;
+  } }));
   fixture.api.get.mockResolvedValue({ result: [], result_info: { total_pages: 1 } });
 });
 
@@ -303,6 +319,245 @@ describe('explicit pilot routing activation', () => {
     });
     await expect(wireMail('zone', 'mail-in-pilot', 'pilot.example.com')).rejects.toThrow(/apex.*changed/i);
     expect(fixture.api.emailSending.subdomains.create).not.toHaveBeenCalled();
+  });
+});
+
+describe('provider-supplied sending DNS', () => {
+  beforeEach(() => { records = structuredClone(apex); });
+
+  it('resumes provider 409/code 2040 only after refetching the exact enabled identity, then reruns without writes', async () => {
+    fixture.api.emailSending.subdomains.create.mockRejectedValue(alreadySending);
+    fixture.api.emailSending.subdomains.list.mockImplementation(() => ({ async *[Symbol.asyncIterator]() {
+      yield { ...sendingIdentity, name: 'foreign.example.com' };
+      yield sendingIdentity;
+    } }));
+    await onboardSendingDomain('zone', 'pilot.example.com');
+    expect(fixture.api.emailSending.subdomains.list).toHaveBeenCalledWith({ zone_id: 'zone' });
+    expect(fixture.api.emailSending.subdomains.dns.get).toHaveBeenCalledWith(sendingIdentity.tag, { zone_id: 'zone' });
+    expect(fixture.api.dns.records.create).toHaveBeenCalledTimes(6);
+    await onboardSendingDomain('zone', 'pilot.example.com');
+    expect(fixture.api.dns.records.create).toHaveBeenCalledTimes(6);
+  });
+
+  it.each([
+    { status: 409 }, { status: 409, error: { errors: [{ code: 2007 }] } },
+    { status: 422, error: { errors: [{ code: 2040 }] } },
+    { status: 409, error: { errors: [{ code: 2040 }, { code: 2007 }] } },
+    { status: 409, errors: [{ code: 2040 }] }
+  ])('propagates an unrecognized registration conflict without fallback (%j)', async error => {
+    fixture.api.emailSending.subdomains.create.mockRejectedValue(error);
+    await expect(onboardSendingDomain('zone', 'pilot.example.com')).rejects.toMatchObject(error);
+    expect(fixture.api.emailSending.subdomains.list).not.toHaveBeenCalled();
+    expect(fixture.api.emailSending.subdomains.dns.get).not.toHaveBeenCalled();
+    expect(fixture.api.dns.records.create).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [], [{ ...sendingIdentity, name: 'foreign.example.com' }],
+    [sendingIdentity, sendingIdentity], [{ ...sendingIdentity, enabled: false }],
+    [{ ...sendingIdentity, tag: 'missing' }], [{ ...sendingIdentity, dkim_selector: 'foreign.example.com' }],
+    [{ ...sendingIdentity, return_path_domain: 'cf-bounce.example.com' }]
+  ].map(identities => ({ identities })))('rejects an unverifiable existing sending identity without DNS writes (%j)', async ({ identities }) => {
+    fixture.api.emailSending.subdomains.create.mockRejectedValue(alreadySending);
+    fixture.api.emailSending.subdomains.list.mockImplementation(() => ({ async *[Symbol.asyncIterator]() { yield* identities; } }));
+    await expect(onboardSendingDomain('zone', 'pilot.example.com')).rejects.toThrow(/sending/i);
+    expect(fixture.api.emailSending.subdomains.dns.get).not.toHaveBeenCalled();
+    expect(fixture.api.dns.records.create).not.toHaveBeenCalled();
+  });
+
+  it('propagates a failed existing-domain lookup without DNS writes', async () => {
+    fixture.api.emailSending.subdomains.create.mockRejectedValue(alreadySending);
+    const error = { status: 503 };
+    fixture.api.emailSending.subdomains.list.mockImplementation(() => ({ async *[Symbol.asyncIterator]() { throw error; } }));
+    await expect(onboardSendingDomain('zone', 'pilot.example.com')).rejects.toMatchObject(error);
+    expect(fixture.api.emailSending.subdomains.dns.get).not.toHaveBeenCalled();
+    expect(fixture.api.dns.records.create).not.toHaveBeenCalled();
+  });
+
+  it('creates the observed six-row sending preview with fresh monitor DMARC, and reruns without writes', async () => {
+    await onboardSendingDomain('zone', 'pilot.example.com');
+    expect(fixture.api.emailSending.subdomains.dns.get).toHaveBeenCalledWith('a'.repeat(32), { zone_id: 'zone' });
+    expect(fixture.api.dns.records.create).toHaveBeenCalledTimes(6);
+    expect(records.slice(0, apex.length)).toEqual(apex);
+    expect(records.find(record => record.name === '_dmarc.pilot.example.com')?.content).toBe('v=DMARC1; p=none');
+    expect(records.find(record => record.name === 'cf-bounce._domainkey.pilot.example.com')?.content).toBe(sendingExpected[4].content);
+    await onboardSendingDomain('zone', 'pilot.example.com');
+    expect(fixture.api.dns.records.create).toHaveBeenCalledTimes(6);
+    expect(fixture.api.dns.records.update).not.toHaveBeenCalled();
+    expect(fixture.api.dns.records.delete).not.toHaveBeenCalled();
+  });
+
+  it('preserves preexisting monitor DMARC bytes and a merged quoted bounce SPF', async () => {
+    const dmarc = { id: 'monitor', type: 'TXT', name: '_dmarc.pilot.example.com', content: '"v=DMARC1; p=none; rua=mailto:owner@pilot.example.com"' };
+    const spf = { id: 'merged', type: 'TXT', name: 'cf-bounce.pilot.example.com', content: '"v=spf1 include:_spf.google.com include:_spf.mx.cloudflare.net -all"' };
+    records.push(dmarc, spf);
+    await onboardSendingDomain('zone', 'pilot.example.com');
+    expect(records).toContainEqual(dmarc);
+    expect(records).toContainEqual(spf);
+    expect(fixture.api.dns.records.create).toHaveBeenCalledTimes(4);
+  });
+
+  it('preserves the observed 255/165-character DKIM chunks as equivalent to the single-string provider preview', async () => {
+    const value = sendingExpected[4].content.slice(1, -1);
+    const stored = `"${value.slice(0, 255)}" "${value.slice(255)}"`;
+    records.push(...sendingExpected.map((record, index) => ({ id: `existing-${index}`, ...record,
+      content: index === 4 ? stored : index === 5 ? 'v=DMARC1; p=none' : record.content })));
+    const before = structuredClone(records);
+    expect(sendingExpected[4].content).toHaveLength(422);
+    expect(stored).toHaveLength(425);
+    await onboardSendingDomain('zone', 'pilot.example.com');
+    expect(records).toEqual(before);
+    expect(fixture.api.dns.records.create).not.toHaveBeenCalled();
+    expect(fixture.api.dns.records.update).not.toHaveBeenCalled();
+    expect(fixture.api.dns.records.delete).not.toHaveBeenCalled();
+  });
+
+  it('accepts equivalent DKIM chunks in the provider preview and verifies a concurrent normalized create', async () => {
+    const value = sendingExpected[4].content.slice(1, -1);
+    const stored = `"${value.slice(0, 255)}" "${value.slice(255)}"`;
+    fixture.api.emailSending.subdomains.dns.get.mockImplementation(() => ({ async *[Symbol.asyncIterator]() {
+      yield* sendingExpected.map((record, index) => index === 4 ? { ...record, content: stored } : record);
+    } }));
+    const create = fixture.api.dns.records.create.getMockImplementation()!;
+    fixture.api.dns.records.create.mockImplementation(async params => {
+      if (params.name === sendingExpected[4].name) {
+        await create({ ...params, content: sendingExpected[4].content });
+        throw { status: 409 };
+      }
+      return create(params);
+    });
+    await onboardSendingDomain('zone', 'pilot.example.com');
+    expect(records).toHaveLength(apex.length + 6);
+  });
+
+  it.each(['different-key', 'case-changed-key', 'escaped', 'unterminated', 'unquoted-suffix', 'unquoted-prefix', 'no-separator'])('rejects %s DKIM without changing occupied records', async presentation => {
+    const value = sendingExpected[4].content.slice(1, -1);
+    const first = value.slice(0, 255);
+    const last = value.slice(255);
+    const content = presentation === 'different-key' ? `"${first}" "B${last.slice(1)}"` :
+      presentation === 'case-changed-key' ? `"${first}" "a${last.slice(1)}"` :
+      presentation === 'escaped' ? `"${first}" "\\065${last}"` :
+      presentation === 'unterminated' ? `"${first}" "${last}` :
+      presentation === 'unquoted-suffix' ? `"${first}" ${last}` :
+      presentation === 'unquoted-prefix' ? `${first} "${last}"` : `"${first}""${last}"`;
+    records.push({ id: 'occupied-dkim', type: 'TXT', name: sendingExpected[4].name, content });
+    const before = structuredClone(records);
+    await expect(onboardSendingDomain('zone', 'pilot.example.com')).rejects.toThrow(/DKIM conflicts/i);
+    expect(records).toEqual(before);
+    expect(fixture.api.dns.records.create).not.toHaveBeenCalled();
+    expect(fixture.api.dns.records.update).not.toHaveBeenCalled();
+    expect(fixture.api.dns.records.delete).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { type: 'MX', name: 'cf-bounce.pilot.example.com', content: 'old-provider.test' },
+    { type: 'TXT', name: 'cf-bounce.pilot.example.com', content: 'v=spf1 include:_spf.google.com -all' },
+    { type: 'TXT', name: 'cf-bounce._domainkey.pilot.example.com', content: 'v=DKIM1; k=rsa; p=BBBB' },
+    { type: 'CNAME', name: 'cf-bounce._domainkey.pilot.example.com', content: 'old-provider.test' },
+    { type: 'NS', name: 'cf-bounce.pilot.example.com', content: 'old-provider.test' },
+    { type: 'TXT', name: '_dmarc.pilot.example.com', content: 'unrelated-policy' },
+    { type: 'TXT', name: '_dmarc.pilot.example.com', content: 'v=DMARC1; p=none; p=reject' }
+  ])('preserves conflicting occupied sending names and blocks all DNS writes (%j)', async record => {
+    records.push({ id: 'occupied', ...record });
+    const before = structuredClone(records);
+    await expect(onboardSendingDomain('zone', 'pilot.example.com')).rejects.toThrow(/conflict|aliased|delegated/i);
+    expect(records).toEqual(before);
+    expect(fixture.api.dns.records.create).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['"v=spf1 include:_spf.mx.cloudflare.net ~all'],
+    ['"v=spf1 include:_spf.mx.cloudflare.net" "~all"'],
+    ['v=spf1 include:_spf.mx.cloudflare.net ~all', '"v=spf1 include:_spf.mx.cloudflare.net ~all"']
+  ].map(policies => ({ policies })))('rejects malformed or duplicate bounce SPF before all writes (%j)', async ({ policies }) => {
+    records.push(...policies.map((content, index) => ({ id: `spf-${index}`, type: 'TXT', name: 'cf-bounce.pilot.example.com', content })));
+    const before = structuredClone(records);
+    await expect(onboardSendingDomain('zone', 'pilot.example.com')).rejects.toThrow(/SPF conflict/i);
+    expect(records).toEqual(before);
+    expect(fixture.api.dns.records.create).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { tag: undefined }, { name: 'foreign.test' }, { enabled: false },
+    { return_path_domain: 'cf-bounce.example.com' }, { dkim_selector: 'foreign.example.com' }
+  ])('rejects incomplete or foreign sending registration metadata before DNS writes (%j)', async override => {
+    fixture.api.emailSending.subdomains.create.mockResolvedValue({ name: 'pilot.example.com', enabled: true,
+      tag: 'a'.repeat(32), dkim_selector: 'cf-bounce', return_path_domain: 'cf-bounce.pilot.example.com', ...override });
+    await expect(onboardSendingDomain('zone', 'pilot.example.com')).rejects.toThrow(/sending/i);
+    expect(fixture.api.dns.records.create).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [], sendingExpected.slice(0, 4),
+    [...sendingExpected, { type: 'TXT', name: 'google._domainkey.example.com', content: 'v=DKIM1; k=rsa; p=AAAA' }],
+    [{ ...sendingExpected[0], name: 'cf-bounce.foreign.test' }, ...sendingExpected.slice(1)],
+    [{ ...sendingExpected[0], type: 'A' }, ...sendingExpected.slice(1)],
+    [...sendingExpected.slice(0, 4), { ...sendingExpected[4], content: 'malformed-DKIM' }, sendingExpected[5]]
+  ].map(preview => ({ preview })))('rejects unsupported provider sending DNS before writes (%j)', async ({ preview }) => {
+    fixture.api.emailSending.subdomains.dns.get.mockImplementation(() => ({ async *[Symbol.asyncIterator]() { yield* preview; } }));
+    await expect(onboardSendingDomain('zone', 'pilot.example.com')).rejects.toThrow(/sending/i);
+    expect(fixture.api.dns.records.create).not.toHaveBeenCalled();
+  });
+
+  it.each(['registration', 'preview', 'write'])('propagates %s API errors without false readiness', async stage => {
+    const error = { status: 403 };
+    if (stage === 'registration') fixture.api.emailSending.subdomains.create.mockRejectedValue(error);
+    if (stage === 'preview') fixture.api.emailSending.subdomains.dns.get.mockImplementation(() => ({ async *[Symbol.asyncIterator]() { throw error; } }));
+    if (stage === 'write') fixture.api.dns.records.create.mockRejectedValue(error);
+    await expect(onboardSendingDomain('zone', 'pilot.example.com')).rejects.toMatchObject(error);
+    expect(records).toEqual(apex);
+  });
+
+  it.each([409, 422])('does not swallow DNS write status %s when no matching record exists', async status => {
+    fixture.api.dns.records.create.mockRejectedValue({ status });
+    await expect(onboardSendingDomain('zone', 'pilot.example.com')).rejects.toMatchObject({ status });
+    expect(records).toEqual(apex);
+  });
+
+  it('accepts a concurrent DNS conflict only after verifying the exact provider requirement', async () => {
+    const create = fixture.api.dns.records.create.getMockImplementation()!;
+    fixture.api.dns.records.create.mockImplementationOnce(async params => {
+      await create(params);
+      throw { status: 409 };
+    });
+    await onboardSendingDomain('zone', 'pilot.example.com');
+    expect(records).toHaveLength(apex.length + 6);
+  });
+
+  it('resumes a partially applied sending plan without duplicating or replacing successful records', async () => {
+    const create = fixture.api.dns.records.create.getMockImplementation()!;
+    fixture.api.dns.records.create.mockImplementationOnce(create).mockRejectedValueOnce({ status: 503 });
+    await expect(onboardSendingDomain('zone', 'pilot.example.com')).rejects.toMatchObject({ status: 503 });
+    const successful = structuredClone(records.at(-1));
+    await onboardSendingDomain('zone', 'pilot.example.com');
+    expect(records).toContainEqual(successful);
+    expect(records.filter(record => record.name === 'cf-bounce.pilot.example.com' && record.type === 'MX')).toHaveLength(3);
+    expect(records).toHaveLength(apex.length + 6);
+    expect(fixture.api.dns.records.update).not.toHaveBeenCalled();
+    expect(fixture.api.dns.records.delete).not.toHaveBeenCalled();
+  });
+});
+
+for (const flow of ['routing', 'sending'] as const) describe(`${flow} SPF version-boundary conflicts`, () => {
+  beforeEach(() => { records = structuredClone(apex); });
+
+  it.each([
+    ['"v=spf1" " include:_spf.mx.cloudflare.net ~all"'],
+    ['"v=spf1\\032include:_spf.mx.cloudflare.net ~all"'],
+    ['v=spf1\\ include:_spf.mx.cloudflare.net ~all'],
+    ['v=spf1 include:_spf.mx.cloudflare.net "\\032~all"'],
+    ['v=spf1 include:_spf.mx.cloudflare.net ~all"'],
+    ['v=spf1 include:_spf.mx.cloudflare.net ~all', '"v=spf1" " include:_spf.mx.cloudflare.net ~all"']
+  ].map(policies => ({ policies })))('preserves ambiguous or duplicate policy bytes and blocks every DNS write (%j)', async ({ policies }) => {
+    const name = flow === 'routing' ? 'pilot.example.com' : 'cf-bounce.pilot.example.com';
+    records.push(...policies.map((content, index) => ({ id: `ambiguous-spf-${index}`, type: 'TXT', name, content })));
+    const before = structuredClone(records);
+    const operation = flow === 'routing' ? wireMail('zone', 'mail-in-pilot', 'pilot.example.com') : onboardSendingDomain('zone', 'pilot.example.com');
+    await expect(operation).rejects.toThrow(/SPF/i);
+    expect(records).toEqual(before);
+    expect(fixture.api.dns.records.create).not.toHaveBeenCalled();
+    expect(fixture.api.dns.records.update).not.toHaveBeenCalled();
+    expect(fixture.api.dns.records.delete).not.toHaveBeenCalled();
   });
 });
 

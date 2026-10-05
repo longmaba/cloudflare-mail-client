@@ -4,6 +4,7 @@ import { APP_CLOUDFLARE_ACCOUNT_ID, APP_CLOUDFLARE_API_TOKEN, MAIL_DOMAIN, MAIL_
 import { assertMailScope } from './routing-policy.js';
 import type { DNSRecord } from 'cloudflare/resources/email-routing/dns';
 import type { RecordCreateParams, RecordResponse } from 'cloudflare/resources/dns/records';
+import type { SubdomainCreateResponse } from 'cloudflare/resources/email-sending/subdomains/subdomains';
 type MailDnsCreate = Extract<RecordCreateParams, { type: 'MX' | 'TXT' }>;
 
 /** Safe operator-facing setup failures; SDK errors keep their separate handling. */
@@ -247,7 +248,7 @@ async function protectedApexDns(zoneId: string, zone: string, existingDkim?: Rea
     const dkim = ['TXT', 'CNAME'].includes(record.type) &&
       (name === `_domainkey.${zone}` || name.endsWith(`._domainkey.${zone}`));
     if ((record.type === 'MX' && name === zone) ||
-        (record.type === 'TXT' && name === zone && /^\s*"?v=spf1(?:\s|$)/i.test(record.content ?? '')) ||
+        (record.type === 'TXT' && name === zone && isSpfCandidate(record.content)) ||
         (record.type === 'TXT' && name === `_dmarc.${zone}`) ||
         (dkim && (!existingDkim || existingDkim.has(name)))) {
       if (dkim) dkimNames.add(name);
@@ -299,7 +300,7 @@ export async function writeDnsRecords(
       !requiredMx.some(wanted => dnsContent(record.content) === dnsContent(wanted.content)))) {
     throw new MailSetupError(`Existing MX records already receive mail for ${domain}. Migrate them explicitly before retrying; no records were changed.`);
   }
-  const spf = existing.filter(record => record.type === 'TXT' && /^\s*"?v=spf1(?:\s|$)/i.test(record.content ?? ''));
+  const spf = existing.filter(record => record.type === 'TXT' && isSpfCandidate(record.content));
   if (spf.length > 1 || (spf.length === 1 && !authorizesRouting(spf[0].content ?? ''))) {
     // Nested includes can exceed SPF's lookup limit. Keep the exact operator
     // policy and require a reviewed merge instead of guessing at its semantics.
@@ -327,9 +328,16 @@ function txtValue(content: string): string {
   const value = content.trim();
   return /^"[^"\\]*"$/.test(value) ? value.slice(1, -1) : value;
 }
+function isSpfCandidate(content: string | undefined): boolean {
+  // Quoted chunk boundaries and escapes still indicate an occupied SPF policy;
+  // authorizesRouting rejects their ambiguous presentation before DNS writes.
+  return /^\s*"?v=spf1(?:[\s"\\]|$)/i.test(content ?? '');
+}
 function authorizesRouting(content: string): boolean {
   // Accept a single RFC 1035 quoted string without changing its stored bytes.
-  const terms = txtValue(content).split(/\s+/);
+  const value = txtValue(content);
+  if (/["\\]/.test(value)) return false;
+  const terms = value.split(/\s+/);
   const include = terms.findIndex(term => /^\+?include:_spf\.mx\.cloudflare\.net$/i.test(term));
   const terminal = terms.findIndex(term => /^[+?~-]?all$/i.test(term));
   return /^v=spf1$/i.test(terms[0]) && include > 0 && (terminal < 0 || include < terminal);
@@ -351,7 +359,13 @@ function managedRoutingDkim(record: DNSRecord, zone: string): boolean {
   // bounded rotation-compatibility assumption, not a published API contract.
   // This only excludes shared DKIM from writes; other names still fail closed.
   if (record.type !== 'TXT' || !/^cf\d{4}-[1-9]\d*$/.test(selector) || !record.content) return false;
-  const terms = txtValue(record.content).split(';').map(term => term.trim()).filter(Boolean);
+  return validDkimValue(record.content);
+}
+
+function validDkimValue(content: string): boolean {
+  const value = dkimTxtValue(content);
+  if (value === undefined) return false;
+  const terms = value.split(';').map(term => term.trim()).filter(Boolean);
   if (!/^v\s*=\s*DKIM1$/i.test(terms[0] ?? '')) return false;
   const tags = new Map<string, string>();
   for (const term of terms) {
@@ -363,6 +377,15 @@ function managedRoutingDkim(record: DNSRecord, zone: string): boolean {
   return tags.get('k')?.toLowerCase() === 'rsa' &&
     (!tags.has('h') || tags.get('h')?.toLowerCase() === 'sha256') &&
     /^[A-Za-z0-9+/]+={0,2}$/.test(key) && key.length % 4 === 0;
+}
+
+function dkimTxtValue(content: string): string | undefined {
+  const value = content.trim();
+  if (!/["\\]/.test(value)) return value;
+  // Cloudflare splits long TXT values into quoted chunks. DKIM concatenates
+  // these without adding spaces; malformed/escaped presentations fail closed.
+  if (!/^"[^"\\]*"(?:\s+"[^"\\]*")*$/.test(value)) return undefined;
+  return [...value.matchAll(/"([^"\\]*)"/g)].map(match => match[1]).join('');
 }
 
 function routingDnsRecord(record: DNSRecord, zone: string, domain: string, zoneId: string): MailDnsCreate | undefined {
@@ -384,7 +407,8 @@ function routingDnsRecord(record: DNSRecord, zone: string, domain: string, zoneI
 
 /**
  * Onboard the exact sending domain (apex or subdomain), with its own signing
- * identity and return path. Idempotent: create re-enables an existing domain.
+ * identity and return path. An already-enabled domain may reject create; resume
+ * only the observed 409/code 2040 after verifying the exact list entry.
  */
 export async function onboardSendingDomain(
   zoneId: string,
@@ -394,11 +418,116 @@ export async function onboardSendingDomain(
   if (!name) return {};
   const zone = await pollZoneStatus(zoneId);
   assertMailScope(name, zone.name, MAIL_DOMAIN ?? '', MAIL_ROUTING_MODE ?? 'manual');
-  const res = await cf().emailSending.subdomains.create({ zone_id: zoneId, name });
+  let res: SubdomainCreateResponse | undefined;
+  try {
+    res = await cf().emailSending.subdomains.create({ zone_id: zoneId, name });
+  } catch (cause) {
+    const error = cause as { status?: number; error?: { errors?: Array<{ code?: number }> } };
+    const errors = error?.error?.errors;
+    if (error?.status !== 409 || !Array.isArray(errors) || !errors.length || !errors.every(item => item?.code === 2040)) throw cause;
+    const matches: SubdomainCreateResponse[] = [];
+    for await (const existing of cf().emailSending.subdomains.list({ zone_id: zoneId })) {
+      if (existing.name === name) matches.push(existing);
+    }
+    if (matches.length !== 1) {
+      throw new MailSetupError('The existing sending domain could not be verified uniquely. No sending DNS records were changed.');
+    }
+    res = matches[0];
+  }
+  if (res?.name !== name || res.enabled !== true || !/^[a-f0-9]{32}$/i.test(res.tag ?? '') ||
+      !res.return_path_domain || !res.dkim_selector ||
+      !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(res.dkim_selector)) {
+    throw new MailSetupError('Cloudflare returned incomplete or unscoped sending-domain metadata.');
+  }
+  const bounce = dnsContent(res.return_path_domain);
+  if (!bounce.endsWith(`.${name}`) || !bounce.slice(0, -name.length - 1).split('.').every(label =>
+      /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) {
+    throw new MailSetupError('The sending return-path is outside the configured mail domain.');
+  }
+  await provisionSendingDns(zoneId, name, res.tag, bounce, res.dkim_selector.toLowerCase());
   return {
     dkimSelector: res?.dkim_selector,
     returnPathDomain: res?.return_path_domain,
   };
+}
+
+/** Registration supplies DNS requirements separately; never invent a DKIM key. */
+async function provisionSendingDns(zoneId: string, domain: string, tag: string, bounce: string, selector: string): Promise<void> {
+  const dkimName = `${selector}._domainkey.${domain}`;
+  const dmarcName = `_dmarc.${domain}`;
+  const required: MailDnsCreate[] = [];
+  for await (const record of cf().emailSending.subdomains.dns.get(tag, { zone_id: zoneId })) {
+    const name = dnsContent(record.name);
+    const content = record.content ?? '';
+    const ttl = record.ttl ?? 1;
+    if (!content || !Number.isInteger(ttl) || (ttl !== 1 && (ttl < 60 || ttl > 86400))) {
+      throw new MailSetupError('Cloudflare sending DNS preview has an invalid record value.');
+    }
+    if (record.type === 'MX' && name === bounce && /^[a-z0-9.-]+\.mx\.cloudflare\.net\.?$/i.test(content) &&
+        Number.isInteger(record.priority) && record.priority! >= 0 && record.priority! <= 65535) {
+      required.push({ zone_id: zoneId, type: 'MX', name, content, priority: record.priority!, ttl });
+    } else if (record.type === 'TXT' && ((name === bounce && authorizesRouting(content)) ||
+        (name === dkimName && validDkimValue(content)))) {
+      required.push({ zone_id: zoneId, type: 'TXT', name, content, ttl });
+    } else if (record.type === 'TXT' && name === dmarcName && validDmarcValue(content)) {
+      // Preserve operator policy; fresh instances begin with monitoring.
+      required.push({ zone_id: zoneId, type: 'TXT', name, content: 'v=DMARC1; p=none', ttl: 1 });
+    } else {
+      throw new MailSetupError('Cloudflare sending DNS preview contains an unsupported name, type or policy.');
+    }
+  }
+  if (!required.some(record => record.type === 'MX') ||
+      [bounce, dkimName, dmarcName].some(name => required.filter(record => record.type === 'TXT' && record.name === name).length !== 1)) {
+    throw new MailSetupError('Cloudflare sending DNS preview is incomplete. No sending DNS records were changed.');
+  }
+  const [bounceRecords, dkimRecords, dmarcRecords] = await Promise.all([
+    exactDnsRecords(zoneId, bounce), exactDnsRecords(zoneId, dkimName), exactDnsRecords(zoneId, dmarcName)
+  ]);
+  if ([...bounceRecords, ...dkimRecords, ...dmarcRecords].some(record => record.type === 'CNAME' || record.type === 'NS')) {
+    throw new MailSetupError('Sending DNS is aliased or delegated; resolve the conflict before retrying.');
+  }
+  const mx = required.filter(record => record.type === 'MX');
+  if (bounceRecords.some(record => record.type === 'MX' && !mx.some(wanted => mailDnsMatches(record, wanted)))) {
+    throw new MailSetupError('Sending bounce MX conflicts with an existing provider. Existing records were preserved.');
+  }
+  const spf = bounceRecords.filter(record => record.type === 'TXT' && isSpfCandidate(record.content));
+  if (spf.length > 1 || (spf.length === 1 && !authorizesRouting(spf[0].content ?? ''))) {
+    throw new MailSetupError('Sending bounce SPF conflicts with the existing policy. Merge the Cloudflare include explicitly before retrying.');
+  }
+  const wantedDkim = required.find(record => record.name === dkimName)!;
+  if (dkimRecords.length > 1 || (dkimRecords.length === 1 && !mailDnsMatches(dkimRecords[0], wantedDkim))) {
+    throw new MailSetupError('Sending DKIM conflicts with an occupied selector. Existing records were preserved.');
+  }
+  if (dmarcRecords.length > 1 || (dmarcRecords.length === 1 &&
+      (dmarcRecords[0].type !== 'TXT' || !validDmarcValue(dmarcRecords[0].content ?? '')))) {
+    throw new MailSetupError('Sending DMARC conflicts with the existing policy. Existing records were preserved.');
+  }
+  const existing = [...bounceRecords, ...dkimRecords, ...dmarcRecords];
+  const planned = required.filter(record => record.type === 'MX' ? !existing.some(row => mailDnsMatches(row, record)) :
+    record.name === bounce ? spf.length === 0 : record.name === dkimName ? dkimRecords.length === 0 : dmarcRecords.length === 0);
+  for (const record of planned) {
+    try { await cf().dns.records.create(record); } catch (cause) {
+      if (!isBenignConflict(cause) || !(await exactDnsRecords(zoneId, record.name)).some(row => mailDnsMatches(row, record))) throw cause;
+    }
+  }
+}
+
+function mailDnsMatches(existing: RecordResponse, wanted: MailDnsCreate): boolean {
+  if (existing.type !== wanted.type || dnsContent(existing.name) !== wanted.name) return false;
+  if (wanted.type === 'TXT' && wanted.name.includes('._domainkey.')) {
+    const value = dkimTxtValue(wanted.content ?? '');
+    return value !== undefined && value === dkimTxtValue(existing.content ?? '');
+  }
+  return wanted.type === 'MX'
+    ? dnsContent(existing.content) === dnsContent(wanted.content) && (existing as { priority?: number }).priority === wanted.priority
+    : txtValue(existing.content ?? '') === txtValue(wanted.content ?? '');
+}
+
+function validDmarcValue(content: string): boolean {
+  const value = txtValue(content);
+  return /^v=DMARC1\s*;/i.test(value) &&
+    [...value.matchAll(/(?:^|;)\s*p\s*=/gi)].length === 1 &&
+    /(?:^|;)\s*p\s*=\s*(?:none|quarantine|reject)\s*(?:;|$)/i.test(value);
 }
 
 /**

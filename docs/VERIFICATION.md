@@ -10,7 +10,7 @@ On Windows with Node 24.12.0 and pnpm 10.26.2:
 | --- | --- |
 | Frozen workspace and infrastructure installs | Passed |
 | Workspace type and Svelte checks | Passed, zero errors and warnings |
-| Application tests | 79 files, 772 tests passed |
+| Application tests | 79 files, 837 tests passed |
 | Portable installer tests | 53 tests passed; migration, credential replacement and live API response coverage |
 | Infrastructure TypeScript check | Passed |
 | Production Cloudflare build | Passed |
@@ -86,7 +86,8 @@ Explicit named receiving activation for the pilot returned its exact domain,
 `enabled: true` and `status: ready`. A repeated call returned the same ready
 state. Cloudflare added the pilot MX/SPF records and its shared parent-zone
 Routing DKIM selector; existing provider records were preserved. Domain
-onboarding, recovery/TOTP and real mail acceptance remain in progress.
+onboarding is complete, including verified external recovery and administrator
+TOTP. Real mail acceptance remains in progress.
 
 The provider's five-record DNS preview includes quoted SPF and shared-parent
 Routing DKIM values. A live onboarding attempt exposed the old MX/SPF-only
@@ -98,10 +99,24 @@ outages separately from credential failures.
 Pilot scope checks read the routing DNS preview rather than unrelated apex
 settings; mailbox rules and sending DNS still have independent readiness gates.
 
+Native Sending registration supplies its DNS requirements through a separate
+API. Setup now reads those provider values, validates exact return-path/signing
+names, and creates missing records while preserving existing SPF/DMARC policies.
+The pilot gained three return-path MX records, one SPF and one signing DKIM.
+A repeated run made no changes. Cloudflare stores long DKIM TXT as quoted
+chunks; comparison joins those chunks without changing stored bytes or accepting
+a changed public key. An already-enabled registration's observed HTTP 409/code
+2040 resumes only after verifying one exact enabled domain.
+
+All required live doctor checks pass; optional billing inspection remains a
+warning with scoped credentials. Public DNS resolves Google apex MX and pilot
+receiving/sending records. The owner reports outgoing SPF, DKIM and DMARC pass,
+but its Sent display is under investigation and is not yet accepted.
+
 A read-only comparison against the original DNS snapshot confirmed all five
 Google apex MX records, the apex SPF record and three existing DKIM records
-unchanged. Apex DMARC was absent in both snapshots. No apex migration or real
-mail test has been performed.
+unchanged. Apex DMARC was absent in both snapshots. No apex migration has been
+performed.
 
 Pending evidence includes a fresh real-account installation, independent
 account/domain installation, interrupted live deployment and upgrade preserving
