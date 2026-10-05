@@ -60,6 +60,13 @@ synthetic database fixtures, restored after the run along with session cleanup.
 Development-server hydration/reload was unstable during earlier attempts;
 the production preview run was clean.
 
+The Sent regression passed in local Chrome against the production bundle. A
+completed personal mailbox cache contained an archived sender conversation and
+a sender conversation moved to Inbox by a reply. The actual mirror's Sent query
+returned no rows, while the client showed both through the authorized server
+view and retained them after a full reload. There were no browser errors or
+send/recovery requests; synthetic fixtures were removed and the preview stopped.
+
 Run the reusable harness with the fixture instructions in
 [CONTRIBUTING.md](../CONTRIBUTING.md). External recovery delivery and incoming
 raw attachment rendering remain outside this
@@ -117,6 +124,10 @@ Read-only database checks confirm the delivered sender copy and received reply
 are stored. The complete browser mirror incorrectly hid Sent because it lacks
 sender delivery roles; Sent now retains the authorized server query and refreshes
 after compose and delivery updates. Live display acceptance is pending.
+After deploying this fix, a preserved real message's encrypted fields still
+decrypted to the original digest. All four current messages remain stored;
+the original database/resource identities and key fingerprint match the baseline.
+This is deployment preservation evidence, not a matched backup/restore test.
 
 A read-only comparison against the original DNS snapshot confirmed all five
 Google apex MX records, the apex SPF record and three existing DKIM records
