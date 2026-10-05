@@ -59,7 +59,7 @@ Never use a Global API Key or bind the broad deployment token into the app.
 | Credential | Required permissions and resource scope |
 | --- | --- |
 | Deployment | Account Settings Read; Workers Scripts, D1, Workers KV Storage, Workers R2 Storage, Queues and Secrets Store Edit for the selected account; Zone Read, DNS Edit and Workers Routes Edit for the selected zone |
-| Runtime | Account Settings Read for the selected account; Zone Read, DNS Edit, Email Routing Rules Edit, Email Routing Settings Edit and Email Sending Edit for the selected zone |
+| Runtime | Account Settings Read for the selected account; Zone Read, DNS Edit, Zone Settings Edit and Email Routing Rules Edit for the selected zone; Email Sending Edit at the scope offered by the dashboard (see the token guide) |
 
 Create tokens at Cloudflare **My Profile > API Tokens > Create Custom Token**.
 Use the permissions shown by the installer and doctor; Cloudflare's permission

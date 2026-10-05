@@ -7,7 +7,7 @@
 | `recoveryEmail` | `string \| null` | External address. Rejected at write time if it is on any served domain. |
 | `recoveryEmailVerified` | `boolean` (default `false`) | `input: false` — cannot be set by a client, only by the verify flow. |
 | `recoveryEmailVerifiedAt` | `number \| null` | `input: false`. |
-| `mustChangePassword` | `boolean` (default `false`) | `input: false`. Set when an admin provisions the account with a temp password; forces the set-password onboarding step. Cleared on change. |
+| `mustChangePassword` | `boolean` (default `false`) | `input: false`. Set on an administrator-created account until its owner chooses a password through the protected invitation flow. Cleared on change. |
 | `onboardedAt` | `number \| null` | `input: false`. Stamped once every onboarding step is done; used as the request-hook fast path. |
 | `role` | `string` | From the `admin` plugin: `member` \| `admin` \| `superadmin`. |
 

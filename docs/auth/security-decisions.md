@@ -1,5 +1,9 @@
 # Security decisions
 
+> This page includes upstream audit history. The
+> [current security policy](../../SECURITY.md) and
+> [operations guide](../OPERATIONS.md) govern this fork.
+
 ## Invariants — do NOT "simplify" these
 
 1. **`sendResetPassword` targets `recoveryEmail`, not `user.email`.** Better
@@ -23,22 +27,19 @@
    authenticated dialog (`reset-password.remote.ts`) proves both a mailed code
    and the current password via `changePassword` before the change lands —
    neither alone is enough.
-8. **Provisioned accounts get a temp password + `mustChangePassword`.** The
-   onboarding gate forces the reset before the account can do anything, so the
-   emailed temp value never survives onboarding. (`ponytail:` note in
-   `provisionUser` — swap for a set-password magic link if plaintext-in-mail is
-   ever unacceptable.)
+8. **Provisioned accounts receive a single-use setup link at an external
+   recovery address.** It expires after ten minutes. The recipient chooses a
+   password in the protected form; invitation mail and URLs contain no password.
 9. **Super-admin genesis is email-free; the trust root is deploy access.** At
    genesis no domain is onboarded, so no mail can be delivered (the bootstrap
-   paradox). The super-admin is created with an **unverified** external email and
-   **no mail is sent**. Genesis is gated by possession of instance secrets: the
-   CLI (`reset-admin`) or the `/setup` wizard's one-time `SETUP_TOKEN` — both
-   also require `userCount === 0` and lock out afterward. Never reintroduce an
-   email step into genesis.
+   paradox). The super-admin uses a domain login and a separate **unverified**
+   external recovery address; **no mail is sent** during bootstrap. Genesis
+   requires the `/setup` wizard's one-time `SETUP_TOKEN`, an empty user table
+   and an unused durable bootstrap lock. The recovery CLI cannot create users.
 10. **Super-admin email verification is deferred and its reset is gated on it.**
     Recovery must never depend on an unverified/undeliverable path: the CLI is
-    the floor. `sendResetPassword` only targets the super-admin's `user.email`
-    once `emailVerified` is true, and the verify action itself is only offered
+    the floor. `sendResetPassword` only targets a verified external recovery
+    address, and the verify action itself is only offered
     after a domain is `active` (a working sending path exists).
 11. **Cloudflare credential is a scoped API Token; CF is never on the hot path.**
     `APP_CLOUDFLARE_ACCOUNT_ID` + `APP_CLOUDFLARE_API_TOKEN` (Bearer, not the Global API Key, no account

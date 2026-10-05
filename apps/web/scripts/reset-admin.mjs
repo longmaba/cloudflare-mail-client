@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 // SPDX-License-Identifier: Apache-2.0
 /** Password recovery for an EXISTING super-admin only. First-run provisioning belongs to /setup. */
 import { fileURLToPath } from 'node:url';
@@ -21,6 +20,12 @@ export function requireExistingSuperadmin(user) {
 
 const esc = (value) => String(value).replace(/'/g, "''");
 export const sessionCacheNotice = 'Database and KV session records removed. Existing cached browser cookies may still authorize requests for up to 5 minutes after KV deletion propagates; recovery is not immediate containment.';
+
+/** Wrangler emits JSON results at log level. Capture them privately while
+ * disabling debug output and Wrangler's on-disk response logs. */
+export function recoveryWranglerOptions(env = process.env) {
+  return { env: { ...env, WRANGLER_WRITE_LOGS: 'false', WRANGLER_LOG: 'log' }, capture: true, secrets: ['credential-output'] };
+}
 
 /** Persist exact keys before changing D1 so an interrupted KV purge can resume.
  * The journal is private and doubles as Wrangler's bulk-delete input: secrets
@@ -81,9 +86,9 @@ export async function main(args = process.argv.slice(2)) {
   if (target === '--remote' && !remoteKv) throw new Error('Remote recovery requires the original saved instance and its live DB/AUTH_KV bindings. Restore .local/ first.');
   // Wrangler's debug log normally records D1 responses, including session tokens.
   // Keep credential reads confined to captured pipes and the private journal.
-  env = { ...env, WRANGLER_WRITE_LOGS: 'false', WRANGLER_LOG: 'error' };
+  const commandOptions = recoveryWranglerOptions(env);
   const execute = async (sql) => {
-    const output = await wrangler(['d1', 'execute', database, target, ...configArgs, '--json', '--command', sql], { env, capture: true, secrets: ['credential-output'] });
+    const output = await wrangler(['d1', 'execute', database, target, ...configArgs, '--json', '--command', sql], commandOptions);
     const start = output.indexOf('[');
     if (start < 0) throw new Error('D1 did not return a query result. No recovery result can be confirmed.');
     try { const result = JSON.parse(output.slice(start)); if (!Array.isArray(result)) throw new Error(); return result; }
@@ -111,14 +116,14 @@ export async function main(args = process.argv.slice(2)) {
       if (!response.ok) throw new Error('Cannot enumerate cached sessions. Check Workers KV Storage Read/Edit on the deploy token; recovery is incomplete.');
       value = await response.text();
     } else {
-      value = await wrangler(['kv', 'key', 'get', key, '--binding', 'AUTH_KV', target, ...configArgs], { env, capture: true, secrets: ['credential-output'] });
+      value = await wrangler(['kv', 'key', 'get', key, '--binding', 'AUTH_KV', target, ...configArgs], commandOptions);
       if (value.trim() === 'Value not found') return [];
     }
     try { const list = JSON.parse(value); if (!Array.isArray(list) || list.some((entry) => typeof entry.token !== 'string' || !entry.token)) throw new Error(); return list.map((entry) => entry.token); }
     catch { throw new Error('Cached session list is malformed. Recovery is incomplete; inspect the private instance.'); }
   };
   await recoverExistingAdmin({ user, password, clearTwoFactor: args.includes('--clear-2fa'), execute, cachedTokens, journal,
-    purgeKeys: () => wrangler(['kv', 'bulk', 'delete', journalPath, '--binding', 'AUTH_KV', target, ...configArgs, '--force'], { env, capture: true, secrets: ['credential-output'] }) });
+    purgeKeys: () => wrangler(['kv', 'bulk', 'delete', journalPath, '--binding', 'AUTH_KV', target, ...configArgs, '--force'], commandOptions) });
   process.stdout.write(`Password reset for existing super-admin ${email}${args.includes('--clear-2fa') ? '; 2FA cleared' : ''}. ${sessionCacheNotice}\n`);
 }
 

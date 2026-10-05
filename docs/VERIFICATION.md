@@ -10,7 +10,7 @@ On Windows with Node 24.12.0 and pnpm 10.26.2:
 | --- | --- |
 | Frozen workspace and infrastructure installs | Passed |
 | Workspace type and Svelte checks | Passed, zero errors and warnings |
-| Application tests | 79 files, 738 tests passed |
+| Application tests | 79 files, 739 tests passed |
 | Portable installer tests | 26 tests passed |
 | Infrastructure TypeScript check | Passed |
 | Production Cloudflare build | Passed |
@@ -26,6 +26,10 @@ The GitHub Actions matrix runs frozen installs, installer tests, checks,
 application tests and production builds on Windows, macOS and Linux. Its
 [current results](https://github.com/longmaba/cloudflare-mail-client/actions)
 are the authority for cross-platform CI status.
+
+Recovery tests also passed with Windows CRLF checkouts. An actual read-only
+local Wrangler D1 query confirmed that the recovery command preserves JSON
+output while disabling response logs; the focused recovery suite has five tests.
 
 ## Browser evidence
 
@@ -44,9 +48,19 @@ HTTP 201; the reopened attachment returned HTTP 200 with identical bytes.
 No send action was attempted. Desktop captures use 1280 by 800 pixels and the
 mobile inbox uses 390 by 844 pixels; physical devices were not tested.
 
+Administrator TOTP was exercised against the production bundle in local
+Wrangler preview. The owner was required to enroll; a valid TOTP completed
+enrollment, and a fresh browser context required a challenge after password
+login. A wrong code returned HTTP 401 without a session; the correct code
+returned HTTP 200 and unlocked the Inbox. There were no page errors or mail
+send attempts. Domain activation and external recovery readiness were temporary
+synthetic database fixtures, restored after the run along with session cleanup.
+Development-server hydration/reload was unstable during earlier attempts;
+the production preview run was clean.
+
 Run the reusable harness with the fixture instructions in
-[CONTRIBUTING.md](../CONTRIBUTING.md). Administrator TOTP enrollment, external
-recovery delivery and incoming raw attachment rendering remain outside this
+[CONTRIBUTING.md](../CONTRIBUTING.md). External recovery delivery and incoming
+raw attachment rendering remain outside this
 browser evidence; their automated coverage does not replace live acceptance.
 
 [Screenshots](screenshots.md) use only local synthetic accounts and mail.

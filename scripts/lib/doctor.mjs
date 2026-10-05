@@ -54,7 +54,7 @@ export async function inspectInstance(config, secrets, token, { api = cloudflare
     return { status: zone.status === 'active' ? 'pass' : 'fail', detail: zone.status === 'active' ? `${zone.name} is active` : 'Activate the zone in Cloudflare before deployment.' };
   });
   await check('Runtime token scope', async () => {
-    if (!secrets.runtimeToken) throw new Error('Missing runtime token. Supply a separate token scoped to this zone for DNS Read/Edit, Email Routing Read/Edit and Email Sending Edit.');
+    if (!secrets.runtimeToken) throw new Error('Missing runtime token. Supply a separate token scoped to this zone for DNS Edit, Zone Settings Edit, Email Routing Rules Edit and Email Sending Edit. See docs/TOKENS.md.');
     const runtimeApi = cloudflare(secrets.runtimeToken, fetcher);
     await runtimeApi(`/zones/${config.zoneId}`);
     await runtimeApi(`/zones/${config.zoneId}/dns_records?per_page=1`);

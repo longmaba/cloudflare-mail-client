@@ -43,5 +43,10 @@ export function requireExistingSuperadmin<T extends RecoveryCandidate>(
   user: T | null | undefined,
 ): T;
 export const sessionCacheNotice: string;
+export function recoveryWranglerOptions(env?: Record<string, string | undefined>): {
+  env: Record<string, string | undefined>;
+  capture: true;
+  secrets: string[];
+};
 export function recoverExistingAdmin(options: RecoverExistingAdminOptions): Promise<void>;
 export function main(args?: string[]): Promise<void>;

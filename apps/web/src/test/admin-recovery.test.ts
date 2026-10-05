@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import * as schema from "@doota/db/schema";
 import { makeDb } from "./mail-db";
 import { setRequestEvent } from "./stubs/app-server";
-import { recoverExistingAdmin, sessionCacheNotice } from "../../scripts/reset-admin.mjs";
+import { recoverExistingAdmin, recoveryWranglerOptions, sessionCacheNotice } from "../../scripts/reset-admin.mjs";
 import { createAuth } from "$lib/server/auth.js";
 
 vi.mock("$lib/server/mailer", () => ({ sendMailBackground: vi.fn() }));
@@ -45,6 +45,20 @@ beforeEach(async () => {
 });
 
 describe("administrator CLI recovery revocation", () => {
+  it("captures Wrangler query output without suppressing JSON or enabling response logs", () => {
+    for (const level of ["error", "debug"]) {
+      const env = { WRANGLER_LOG: level, WRANGLER_WRITE_LOGS: "true", CLOUDFLARE_API_TOKEN: "private-fixture" };
+      const options = recoveryWranglerOptions(env);
+      expect(options).toEqual({
+        env: { ...env, WRANGLER_LOG: "log", WRANGLER_WRITE_LOGS: "false" },
+        capture: true,
+        secrets: ["credential-output"],
+      });
+      expect(env.WRANGLER_LOG).toBe(level);
+      expect(env.WRANGLER_WRITE_LOGS).toBe("true");
+    }
+  });
+
   it("removes real Better Auth cached sessions that survive D1-only deletion", async () => {
     const session = await ctx.internalAdapter.createSession("admin");
     await db.$client.execute("DELETE FROM session WHERE user_id='admin'");

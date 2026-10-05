@@ -19,13 +19,22 @@ Cloudflare may label write access `Write` instead of `Edit`.
 | Token | Account permissions | Zone permissions |
 | --- | --- | --- |
 | Deployment | Account Settings Read; Workers Scripts, D1, Workers KV Storage, Workers R2 Storage, Queues and Secrets Store Edit | Zone Read, DNS Edit, Workers Routes Edit |
-| Runtime | Account Settings Read | Zone Read, DNS Edit, Email Routing Rules Edit, Email Routing Settings Edit, Email Sending Edit |
+| Runtime | Account Settings Read | Zone Read, DNS Edit, Zone Settings Edit, Email Routing Rules Edit |
+
+Routing settings use **Zone > Zone Settings > Edit** (or `Write`), not a
+permission named "Email Routing Settings". See the
+[routing settings API](https://developers.cloudflare.com/api/resources/email_routing/methods/edit/).
 
 Restrict **Account Resources** to your selected account and **Zone Resources**
 to **Specific zone > your domain**. Do not select all accounts or all zones.
 If Email Sending appears under Account permissions in your dashboard, scope it
-to the selected account. If a required group is missing, check account feature
-availability before continuing. Native email sending is still in beta.
+to the selected account. Add **Email Sending > Edit/Write** for the runtime
+token at the scope offered by your dashboard; check both Account and Zone.
+Cloudflare documents the permission but does not publish its scope in the
+general permission table. If it is absent despite Workers Paid and an accessible
+Email Sending page, do not substitute a Global API Key or assume a private-beta
+waitlist. Check account membership permissions and report the missing group
+before completing live sending setup. Native email sending is in public beta.
 
 Select **Continue to summary**, review the resource limits, and select
 **Create Token**. The secret is shown once. Keep it private and provide each

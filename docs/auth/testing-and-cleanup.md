@@ -1,5 +1,9 @@
 # Testing auth locally & cleanup
 
+> Upstream testing notes follow. Use [CONTRIBUTING.md](../../CONTRIBUTING.md)
+> for current synthetic fixtures and browser checks, and
+> [OPERATIONS.md](../OPERATIONS.md) for administrator recovery.
+
 ## Prerequisites
 
 ```bash
@@ -43,15 +47,9 @@ curl** — SvelteKit's remote-form POST uses a binary wire protocol. Test those
 through the browser, or exercise the same `internalAdapter` sequence from a
 throwaway dev-only `+server.ts` (guard with `if (!dev) error(404)`, delete after).
 
-**Fastest genesis for local testing** is the CLI (no browser, no mail):
-
-```bash
-pnpm reset-admin superadmin@external-test.dev 'TestPass123!' --name 'Test Super'
-# prints an otpauth:// URI + backup codes; enrolls TOTP; email stays unverified
-```
-
-The web `/setup` wizard needs `SETUP_TOKEN` set in `.env` and is opened at
-`/setup?token=<SETUP_TOKEN>` (only while `userCount === 0`).
+Create the first administrator through the protected `/setup` wizard. Use
+the private bootstrap URL saved by `pnpm run setup`; do not put setup tokens
+or passwords in shared logs. The recovery CLI cannot provision accounts.
 
 **Cloudflare onboarding** needs `APP_CLOUDFLARE_ACCOUNT_ID` + `APP_CLOUDFLARE_API_TOKEN` (scoped Bearer)
 and `MAIL_IN_WORKER_NAME`. `zoneCreate` first lists zones (read-only); a
@@ -67,8 +65,8 @@ pnpm wrangler d1 execute doota --local --command "SELECT email, role FROM user;"
 
 Any test that creates users, verification tokens, or rate-limit rows **must
 clean up after itself.** Do not leave test accounts in the local D1 — a leftover
-user makes the genesis bootstrap guard (`userCount > 0`) refuse to run (CLI and
-`/setup` both), and stale rows pollute later tests.
+user makes the `/setup` bootstrap guard (`userCount > 0`) refuse to run, and
+stale rows pollute later tests.
 
 Scope deletes to your known test emails (safer than truncating). Deleting from
 `user` cascades to `session`/`account`/`two_factor`/`passkey`/`member`;
@@ -101,14 +99,16 @@ pnpm wrangler d1 execute doota --local --command \
           (SELECT COUNT(*) FROM rate_limit) AS ratelimits;"
 ```
 
-## CLI superadmin genesis + recovery (test on local first)
+## Existing-superadmin recovery (test on local first)
 
-Auto-detects mode: **genesis** if no super-admin exists (creates the account +
-enrolls TOTP), **reset** if it does.
+Use the masked password prompt. The command refuses missing accounts and
+non-superadmins. Remote recovery requires the original private instance state.
 
 ```bash
-pnpm reset-admin admin@domain.tld <new-password>            # genesis or reset (local)
-pnpm reset-admin admin@domain.tld <new-password> --remote   # production D1
-pnpm reset-admin admin@domain.tld <new-password> --clear-2fa
-pnpm reset-admin admin@domain.tld <new-password> --name "Full Name"  # genesis display name
+pnpm --filter doota run reset-admin admin@example.test
+pnpm --filter doota run reset-admin admin@your-domain.tld --remote
 ```
+
+Use `--clear-2fa` only for an operator-authorized lost-authenticator recovery;
+the administrator must enroll again. Read the session propagation limits in
+[OPERATIONS.md](../OPERATIONS.md) before treating recovery as containment.

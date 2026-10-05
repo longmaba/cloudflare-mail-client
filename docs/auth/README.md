@@ -1,5 +1,10 @@
 # Doota authentication
 
+> This directory includes upstream design history. For this fork, use the
+> [guided installer](../../README.md#install), protected `/setup` wizard and
+> [current security policy](../../SECURITY.md). The recovery CLI only resets an
+> existing administrator; it cannot create accounts.
+
 Doota is self-hosted: **one deployment = one company = one mail domain**
 (`user@domain.tld`). The fact that shapes the whole auth design:
 
@@ -25,7 +30,7 @@ SvelteKit · Cloudflare Workers · D1 · Drizzle · Better Auth (`emailAndPasswo
 | File | What it covers |
 |------|----------------|
 | [architecture.md](architecture.md) | Data model, orgs, roles, plugins, `can()`, the singleton, key files |
-| [flows.md](flows.md) | Email-free genesis (CLI + `/setup`), deferred verify, onboarding gate, Cloudflare domain onboarding, org-centric provisioning, login A/B, forgot/reset & in-app change password, recovery-email set & verify |
+| [flows.md](flows.md) | Protected `/setup`, external recovery, onboarding gate, Cloudflare domain onboarding and account flows |
 | [security-decisions.md](security-decisions.md) | The invariants that must not be "simplified", and the hardening applied |
 | [testing-and-cleanup.md](testing-and-cleanup.md) | How to test auth locally, and the **mandatory** post-test data cleanup |
 
@@ -50,5 +55,5 @@ SvelteKit · Cloudflare Workers · D1 · Drizzle · Better Auth (`emailAndPasswo
 | `src/lib/rpc/reset-password.remote.ts` | Authenticated change-password dialog backend |
 | `src/lib/rpc/recovery-email.remote.ts` | Recovery email set + deferred super-admin email verify |
 | `src/lib/client/auth-client.ts` | Better Auth browser client |
-| `scripts/reset-admin.mjs` | Email-free superadmin **genesis + recovery** CLI (`pnpm reset-admin`) — enrolls TOTP on genesis |
+| `scripts/reset-admin.mjs` | Existing-superadmin recovery CLI with a masked password prompt and session revocation |
 | Routes | `setup/`, `(onboarding)/`, `(app)/`, `(admin)/admin/{organizations,domains,settings}/`, `login/`, `forgot-password/`, `reset-password/`, `verify-recovery-email/`, `(app)/account/security/` |
