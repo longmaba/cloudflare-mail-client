@@ -5,7 +5,7 @@ import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { assertStable, deploymentEnv, keyFingerprint, newSecrets, readInstance, resourceNames, saveInstance, validateConfig, withInstallLock } from '../lib/instance.mjs';
-import { assertRemoteIdentity, assertUnclaimedResources, cloudflare, dnsPreview, externalMx, selectAccountAndZone } from '../lib/cloudflare.mjs';
+import { assertRemoteIdentity, assertUnclaimedResources, cloudflare, dnsPreview, externalMx, selectAccountAndZone, workerSettings } from '../lib/cloudflare.mjs';
 import { inspectInstance } from '../lib/doctor.mjs';
 import { assertUpgradeTag, finishSetup, paidRequirement } from '../instance.mjs';
 import { bootstrapUrl, browserCommand, presentBootstrap } from '../lib/bootstrap.mjs';
@@ -142,6 +142,53 @@ test('Cloudflare credential never appears in errors', async () => {
     return { ok: false, status: 403, json: async () => ({ success: false, errors: [{ code: 10000, message: 'very-private-token rejected' }] }) };
   });
   await assert.rejects(request('/accounts'), (error) => !error.message.includes('very-private-token') && error.message.includes('permissions'));
+});
+
+test('R2 activation error 10042 points to the account dashboard instead of token permissions', async () => {
+  const response = {
+    success: false,
+    errors: [{ code: 10042, message: 'Please enable R2 through the Cloudflare Dashboard.' }],
+    messages: [],
+    result: null,
+  };
+  const request = cloudflare('private-fixture-token', async () => new Response(JSON.stringify(response), { status: 403 }));
+  await assert.rejects(request(`/accounts/${accountB}/r2/buckets`), (error) => {
+    assert.equal(error.status, 403);
+    assert.match(error.message, /10042/);
+    assert.match(error.message, /Storage & databases > R2 Object Storage/);
+    assert.match(error.message, /activate R2/i);
+    assert.match(error.message, /rerun setup/i);
+    assert.doesNotMatch(error.message, /token permissions|private-fixture-token/);
+    return true;
+  });
+});
+
+test('ordinary R2 permission errors keep their scope and hide provider credential text', async () => {
+  const request = cloudflare('private-fixture-token', async () => new Response(JSON.stringify({
+    success: false, errors: [{ code: 10000, message: 'private-fixture-token rejected' }],
+  }), { status: 403 }));
+  await assert.rejects(request(`/accounts/${accountB}/r2/buckets`), (error) => {
+    assert.equal(error.status, 403);
+    assert.match(error.message, /Workers R2 Storage Read\/Edit token permissions/);
+    assert.doesNotMatch(error.message, /activate R2|private-fixture-token/);
+    return true;
+  });
+});
+
+test('Worker settings preserve 404 absence and propagate other status errors with their own scope', async () => {
+  const absent = cloudflare('private-fixture-token', async () => new Response(JSON.stringify({
+    success: false, errors: [{ code: 10007, message: 'Worker not found' }],
+  }), { status: 404 }));
+  assert.equal(await workerSettings(absent, accountB, 'instance-web'), null);
+  const denied = cloudflare('private-fixture-token', async () => new Response(JSON.stringify({
+    success: false, errors: [{ code: 10042, message: 'private-fixture-token rejected' }],
+  }), { status: 403 }));
+  await assert.rejects(workerSettings(denied, accountB, 'instance-web'), (error) => {
+    assert.equal(error.status, 403);
+    assert.match(error.message, /Workers Scripts Read\/Edit token permissions/);
+    assert.doesNotMatch(error.message, /activate R2|private-fixture-token/);
+    return true;
+  });
 });
 
 test('doctor is read-only and does not claim real mail delivery or write-permission proof', async () => {

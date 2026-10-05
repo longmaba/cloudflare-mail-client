@@ -5,6 +5,12 @@ Billing > Subscriptions** for Workers Paid; the account plan starts at $5/month.
 The domain's Cloudflare DNS plan can remain Free. See
 [Workers pricing](https://developers.cloudflare.com/workers/platform/pricing/).
 
+Activate R2 under **Storage & databases > R2 > Overview** and complete the
+account checkout. This enables the storage API; the installer creates the mail
+bucket. R2 includes free monthly usage and bills usage beyond its allowances.
+See [R2 activation](https://developers.cloudflare.com/r2/get-started/) and
+[pricing](https://developers.cloudflare.com/r2/pricing/).
+
 Open **Compute > Email Service > Email Sending** and complete any account
 activation requested. Leave domain onboarding to the installer and web wizard,
 especially when another provider receives apex mail. See
@@ -19,7 +25,7 @@ Cloudflare may label write access `Write` instead of `Edit`.
 | Token | Account permissions | Zone permissions |
 | --- | --- | --- |
 | Deployment | Account Settings Read; Workers Scripts, D1, Workers KV Storage, Workers R2 Storage, Queues and Secrets Store Edit | Zone Read, DNS Edit, Workers Routes Edit |
-| Runtime | Account Settings Read | Zone Read, DNS Edit, Zone Settings Edit, Email Routing Rules Edit |
+| Runtime | Account Settings Read; Email Sending Edit | Zone Read, DNS Edit, Zone Settings Edit, Email Routing Rules Edit |
 
 Routing settings use **Zone > Zone Settings > Edit** (or `Write`), not a
 permission named "Email Routing Settings". See the
@@ -27,14 +33,10 @@ permission named "Email Routing Settings". See the
 
 Restrict **Account Resources** to your selected account and **Zone Resources**
 to **Specific zone > your domain**. Do not select all accounts or all zones.
-If Email Sending appears under Account permissions in your dashboard, scope it
-to the selected account. Add **Email Sending > Edit/Write** for the runtime
-token at the scope offered by your dashboard; check both Account and Zone.
-Cloudflare documents the permission but does not publish its scope in the
-general permission table. If it is absent despite Workers Paid and an accessible
-Email Sending page, do not substitute a Global API Key or assume a private-beta
-waitlist. Check account membership permissions and report the missing group
-before completing live sending setup. Native email sending is in public beta.
+For sending, choose **Account > Email Sending > Edit/Write**, scoped to the
+selected account. If it is absent despite Workers Paid and an accessible
+Email Sending page, check account membership permissions; do not substitute a
+Global API Key. Native email sending is in public beta.
 
 Select **Continue to summary**, review the resource limits, and select
 **Create Token**. The secret is shown once. Keep it private and provide each

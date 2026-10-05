@@ -52,14 +52,19 @@ Cloudflare's deploy button does not support this three-Worker deployment:
 ## Credentials and activation
 
 Enable Workers Paid and Email Service sending for your account before testing
-outbound mail. Sign in with Wrangler or provide a scoped deployment API token.
+outbound mail. Also activate an R2 subscription under **Storage & databases >
+R2 > Overview**; the installer creates the bucket afterward. R2 includes free
+monthly usage and bills usage above its allowances. See
+[R2 activation](https://developers.cloudflare.com/r2/get-started/) and
+[R2 pricing](https://developers.cloudflare.com/r2/pricing/).
+Sign in with Wrangler or provide a scoped deployment API token.
 The installer also requires a **separate runtime token** for the selected zone.
 Never use a Global API Key or bind the broad deployment token into the app.
 
 | Credential | Required permissions and resource scope |
 | --- | --- |
 | Deployment | Account Settings Read; Workers Scripts, D1, Workers KV Storage, Workers R2 Storage, Queues and Secrets Store Edit for the selected account; Zone Read, DNS Edit and Workers Routes Edit for the selected zone |
-| Runtime | Account Settings Read for the selected account; Zone Read, DNS Edit, Zone Settings Edit and Email Routing Rules Edit for the selected zone; Email Sending Edit at the scope offered by the dashboard (see the token guide) |
+| Runtime | Account Settings Read and Email Sending Edit for the selected account; Zone Read, DNS Edit, Zone Settings Edit and Email Routing Rules Edit for the selected zone |
 
 Create tokens at Cloudflare **My Profile > API Tokens > Create Custom Token**.
 Use the permissions shown by the installer and doctor; Cloudflare's permission

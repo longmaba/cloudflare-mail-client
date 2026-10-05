@@ -2,7 +2,10 @@
 export class CloudflareError extends Error {
   constructor(path, status, codes) {
     const scope = path.includes('/d1/') ? 'D1 Read/Edit' : path.includes('/r2/') ? 'Workers R2 Storage Read/Edit' : path.includes('/queues') ? 'Queues Read/Edit' : path.includes('/workers/') ? 'Workers Scripts Read/Edit' : path.includes('/email/routing') ? 'Email Routing Read/Edit' : path.includes('/dns_records') ? 'DNS Read/Edit' : path.startsWith('/zones') ? 'Zone Read' : 'Account Settings Read';
-    super(`Cloudflare ${path}: HTTP ${status}${codes.length ? ` (codes ${codes.join(', ')})` : ''}. Check ${scope} token permissions for the selected account/zone. If an existing OAuth login lacks these scopes, reauthenticate with Wrangler or use a scoped deploy token; never substitute the runtime token.`);
+    const action = path.includes('/r2/') && codes.includes(10042)
+      ? 'R2 is not enabled for the selected account. Open the Cloudflare Dashboard > Storage & databases > R2 Object Storage, activate R2, then rerun setup.'
+      : `Check ${scope} token permissions for the selected account/zone. If an existing OAuth login lacks these scopes, reauthenticate with Wrangler or use a scoped deploy token; never substitute the runtime token.`;
+    super(`Cloudflare ${path}: HTTP ${status}${codes.length ? ` (codes ${codes.join(', ')})` : ''}. ${action}`);
     this.status = status;
   }
 }

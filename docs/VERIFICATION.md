@@ -1,6 +1,6 @@
 # Release verification
 
-Release candidate: `v0.1.0-rc.1`. Verification date: 2026-10-05.
+Release candidate: `v0.1.0-rc.2`. Verification date: 2026-10-06.
 
 ## Automated evidence
 
@@ -11,7 +11,7 @@ On Windows with Node 24.12.0 and pnpm 10.26.2:
 | Frozen workspace and infrastructure installs | Passed |
 | Workspace type and Svelte checks | Passed, zero errors and warnings |
 | Application tests | 79 files, 739 tests passed |
-| Portable installer tests | 26 tests passed |
+| Portable installer tests | 29 tests passed |
 | Infrastructure TypeScript check | Passed |
 | Production Cloudflare build | Passed |
 | Local D1 migrations | All migrations through `0058` applied |
@@ -69,9 +69,12 @@ recovery delivery or Cloudflare domain activation.
 
 ## Live acceptance remains open
 
-The available Cloudflare login lacks the deployment and mail/DNS permissions
-required for the first instance. No Cloudflare resources were deployed and no
-mail or DNS records were changed by this implementation session.
+Scoped deployment and runtime tokens passed read-only checks for the selected
+active zone, Workers, D1, KV, queues, DNS, routing settings, sending subdomains
+and sending limits. All five Google apex MX records were present. R2 returned
+HTTP 403 / code 10042 requesting account activation. No Cloudflare resources
+were deployed and no mail or DNS records were changed by this implementation
+session; live setup awaits R2 activation.
 
 Pending evidence includes a fresh real-account installation, independent
 account/domain installation, interrupted live deployment and upgrade preserving
