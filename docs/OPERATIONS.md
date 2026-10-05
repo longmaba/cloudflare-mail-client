@@ -55,6 +55,11 @@ state, fetch the published compatible release, switch to it in a clean checkout
 and run `pnpm run setup`. This resumes the saved instance with its original
 resources and keys. Future upgrades use the restore-point path above.
 
+Starting with `v0.1.0-rc.4`, the remembered mailbox is bound to the signed-in
+user. An older selection without an owner marker is cleared once; reconnect
+if the first offline launch has no mailbox selected. Stored mail is unaffected,
+and subsequent offline launches retain the same user's selection.
+
 Database migrations may not be backward compatible: take a matched backup first. A
 source rollback does not undo a database migration. Restore a matched snapshot
 when a previous release requires the previous schema.

@@ -1,6 +1,6 @@
 # Release verification
 
-Release candidate: `v0.1.0-rc.3`. Verification date: 2026-10-06.
+Release candidate: `v0.1.0-rc.4`. Verification date: 2026-10-06.
 
 ## Automated evidence
 
@@ -10,7 +10,7 @@ On Windows with Node 24.12.0 and pnpm 10.26.2:
 | --- | --- |
 | Frozen workspace and infrastructure installs | Passed |
 | Workspace type and Svelte checks | Passed, zero errors and warnings |
-| Application tests | 80 files, 843 tests passed |
+| Application tests | 82 files, 848 tests passed |
 | Portable installer tests | 72 tests passed; migration, credential replacement, live API responses and pre-upgrade restore points |
 | Infrastructure TypeScript check | Passed |
 | Production Cloudflare build | Passed |
@@ -23,6 +23,9 @@ durable inbound receipts, duplicate deliveries, failed enqueue and replay,
 scoped pilot DNS/rules, interrupted state and upgrade ownership/key guards.
 Sent regression tests cover archived sender copies, replied conversations in
 Inbox, recipient isolation, spam/trash exclusion and complete browser mirrors.
+Account-switch regressions cover releasing offline database ownership while
+preserving other users' files and multiple-tab refusal, clearing another user's
+remembered mailbox, and retaining the same user's offline selection.
 
 The GitHub Actions matrix runs frozen installs, installer tests, checks,
 application tests and production builds on Windows, macOS and Linux. Its
@@ -66,6 +69,17 @@ a sender conversation moved to Inbox by a reply. The actual mirror's Sent query
 returned no rows, while the client showed both through the authorized server
 view and retained them after a full reload. There were no browser errors or
 send/recovery requests; synthetic fixtures were removed and the preview stopped.
+
+Two ordinary members passed 11 production-browser isolation checks using local
+synthetic personal mailboxes. Each member could read their own attachment bytes;
+foreign mailbox/thread/attachment requests and forged sender or alias choices
+were rejected, and search returned only permitted content. A real UI logout and
+login in the same tab immediately selected the second member's Inbox and opened
+its complete offline cache without forced navigation or reload. There were zero
+prior-user renders, browser errors or mail/recovery/external requests. Fixtures
+were removed, private local environment bytes restored and the preview stopped.
+This run exposed and then verified fixes for retained offline pool handles and
+the previous account's remembered mailbox; five new regression tests cover them.
 
 Run the reusable harness with the fixture instructions in
 [CONTRIBUTING.md](../CONTRIBUTING.md). External recovery delivery and incoming
@@ -155,7 +169,7 @@ performed.
 
 Pending evidence includes a fresh real-account installation, independent
 account/domain installation, interrupted live deployment and upgrade preserving
-old mail, aliases and independent member access, queue/storage faults, and
+old mail, real member/alias onboarding and delivery, queue/storage faults, and
 complete bucket backup/operational restore. These are release gates for
 production, not conclusions drawn from mocked tests.
 

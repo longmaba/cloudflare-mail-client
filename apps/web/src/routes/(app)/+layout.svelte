@@ -19,8 +19,12 @@
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { compose } from '$lib/client/compose.svelte.js';
+	import { bindActiveMailbox } from '$lib/client/active-mailbox.svelte.js';
 
 	let { data, children } = $props();
+	// Auth changes reload the document. Reset another user's remembered mailbox
+	// before children can copy it into the URL or seed their local mirror.
+	if (typeof window !== 'undefined') untrack(() => bindActiveMailbox(data.user.id));
 
 	// Persist the sidebar collapsed state across navigations/reloads (runed).
 	const sidebarOpen = new PersistedState('doota:sidebar-open', true);

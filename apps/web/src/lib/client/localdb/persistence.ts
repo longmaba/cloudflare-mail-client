@@ -63,6 +63,10 @@ export async function pickBackend(sqlite3: any): Promise<{
         async destroy(name: string) {
           // ponytail: unlink returns false if not found — both outcomes are fine here
           try { pool.unlink(`/${name}.sqlite3`); } catch { /* missing = ok */ }
+          // The worker closes its DB first. Unlink alone retains the pool's
+          // origin-wide SAH locks, blocking the next signed-in user's worker.
+          // Pause releases those locks while preserving other users' files.
+          pool.pauseVfs();
         },
       };
     } catch (err) {

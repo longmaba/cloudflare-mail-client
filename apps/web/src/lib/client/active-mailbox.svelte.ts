@@ -8,3 +8,12 @@
 import { PersistedState } from 'runed';
 
 export const activeMailbox = new PersistedState<string | null>('doota:active-mailbox', null);
+
+const mailboxOwner = new PersistedState<string | null>('doota:active-mailbox-owner', null);
+
+/** Bind before mailbox consumers mount, including sign-in after session expiry.
+ * A same-user offline launch keeps its pick; another user starts without it. */
+export function bindActiveMailbox(userId: string): void {
+	if (mailboxOwner.current !== userId) activeMailbox.current = null;
+	mailboxOwner.current = userId;
+}
