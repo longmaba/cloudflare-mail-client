@@ -81,6 +81,11 @@ Recovery tests also passed with Windows CRLF checkouts. An actual read-only
 local Wrangler D1 query confirmed that the recovery command preserves JSON
 output while disabling response logs; the focused recovery suite has five tests.
 
+The [RC6 matrix](https://github.com/longmaba/cloudflare-mail-client/actions/runs/37402454066)
+passed all steps on hosted Linux, Windows and macOS at immutable release commit
+`421a3b01f11ce7c522631e7036946c24a1df8d98`, including 901 application tests,
+79 installer tests, checks, frozen installs and production builds.
+
 ## Browser evidence
 
 RC6's recovery dashboard passed in local Chrome against the production build
@@ -256,6 +261,16 @@ encrypted-field and decrypted-content digests, and all five baseline R2 objects
 match the earlier recovery copies. The owner elected to create the separate
 accounts and send invitations personally; live staged-owner setup and apex
 cutover remain pending.
+
+The supported tagged RC5-to-RC6 upgrade updated only the web Worker. Its protected
+D1 restore point matches that exact transition, and in-progress state is cleared.
+The original resources, encryption keys, primary pilot and staging configuration
+are preserved. All four baseline messages decrypt with identical content and
+encrypted-field digests; all five referenced R2 objects match earlier recovery
+copies. Complete zone DNS is unchanged since preparation, required doctor checks
+pass, and administrator verification/security flags are unchanged. The live
+administrator's external recovery is verified while its hosted login remains
+unverified. No new live verification email was dispatched.
 
 Pending evidence includes a fresh real-account installation, independent
 account/domain installation, interrupted live deployment and upgrade preserving
