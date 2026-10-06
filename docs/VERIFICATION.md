@@ -2,6 +2,31 @@
 
 Release candidate: `v0.1.0-rc.9`. Verification date: 2026-10-06.
 
+## Current live status: 2026-10-06
+
+RC9 apex cutover completed at **07:19:40 UTC**, with three literal recipient
+routes to the existing inbound Worker, native apex sending DKIM and monitoring
+DMARC (`p=none`). Mail DNS checks passed through Cloudflare and Google public
+resolvers. Before the latest reply test, preservation checks verified ten
+pre-cutover messages, eleven baseline R2 ciphertext objects and unchanged keys.
+
+After identifying a Google Workspace catch-all for unrecognized recipients and
+following routing guidance, the owner reported that reply delivery works.
+The resulting Google Admin settings were not independently observed. A read-only
+check at **09:45:58 UTC** confirmed a new production reply receipt created at
+**09:45:08 UTC** completed processing: ten inbound receipts complete, two outbound
+submissions sent and one unchanged historical failure in total.
+Further restricted metadata checks at **09:47:46 UTC** confirmed the new Gmail
+reply has a stored message, a reply header and one non-inline attachment. The
+owner reported working client delivery; the metadata check does not independently
+prove opening the attachment in the client.
+
+The other two production accounts still need individual send/Sent/reply/attachment
+and authentication checks. This is evidence of resumed reply delivery,
+not all-account acceptance or a full operational restore. Older Google-MX and
+four-message preservation/restore results below record pilot milestones and do
+not describe the current apex DNS or full current mailbox contents.
+
 ## Automated evidence
 
 On Windows with Node 24.12.0 and pnpm 10.26.2:
@@ -50,8 +75,9 @@ Preexisting policies are never normalized. Tests cover lost PATCH responses,
 failed readiness persistence, duplicate/invalid/annotated policy injection and
 policy reversion after readiness. Existing protected journals retain their
 original preview and digest.
-The current merged public SPF policy resolved to four nested DNS lookups during
-preflight. Actual apex send/receive and post-cutover authentication remain pending.
+The merged SPF policy resolved to four nested DNS lookups during preflight.
+Subsequent live cutover and reply evidence is recorded in the current status
+above; all-account production acceptance remains pending.
 
 Tests cover setup locking, domain/recovery identities, expiring single-use reset
 links, administrator security gates, current mailbox grants and assignments,
@@ -200,7 +226,7 @@ preview stopped, and private local environment bytes restored exactly.
 Synthetic fixture accounts have pre-completed onboarding; they do not prove
 recovery delivery or Cloudflare domain activation.
 
-## Live acceptance remains open
+## Live acceptance and deployment history
 
 Scoped deployment and runtime tokens passed read-only checks for the selected
 active zone, Workers, D1, KV, queues, DNS, routing settings, sending subdomains
@@ -241,8 +267,9 @@ chunks; comparison joins those chunks without changing stored bytes or accepting
 a changed public key. An already-enabled registration's observed HTTP 409/code
 2040 resumes only after verifying one exact enabled domain.
 
-All required live doctor checks pass; optional billing inspection remains a
-warning with scoped credentials. Public DNS resolves Google apex MX and pilot
+At this pilot milestone, all required live doctor checks passed; optional billing
+inspection remained a warning with scoped credentials. Public DNS resolved
+Google apex MX and pilot
 receiving/sending records. The owner reports outgoing SPF, DKIM and DMARC pass.
 Read-only database checks confirm the delivered sender copy and received reply
 are stored. The complete browser mirror incorrectly hid Sent because it lacks
@@ -252,8 +279,9 @@ the original message appears in Sent without resending, the reply attachment
 opens, and mail to the existing apex address still arrives in Google. Outgoing
 SPF, DKIM and DMARC all passed in the external inbox's message details.
 After deploying this fix, a preserved real message's encrypted fields still
-decrypted to the original digest. All four current messages remain stored;
-the original database/resource identities and key fingerprint match the baseline.
+decrypted to the original digest. All four messages at that milestone remained
+stored; the original database/resource identities and key fingerprint matched
+the baseline.
 This is deployment preservation evidence, not a matched backup/restore test.
 
 The actual pilot database's SQL export failed because it contains FTS virtual
@@ -284,8 +312,8 @@ completed live release upgrade; interrupted live-upgrade recovery remains open.
 
 A read-only comparison against the original DNS snapshot confirmed all five
 Google apex MX records, the apex SPF record and three existing DKIM records
-unchanged. Apex DMARC was absent in both snapshots. No apex migration has been
-performed.
+unchanged. Apex DMARC was absent in both snapshots. At this pilot comparison,
+no apex migration had been performed.
 
 The supported tagged RC4-to-RC5 pilot upgrade completed with its matching protected
 D1 Time Travel record, original database/resources/key fingerprint and cleared
@@ -297,7 +325,7 @@ pilot/apex DNS checks pass. All four baseline messages still have identical
 encrypted-field and decrypted-content digests, and all five baseline R2 objects
 match the earlier recovery copies. The owner elected to create the separate
 accounts and send invitations personally; live staged-owner setup and apex
-cutover remain pending.
+cutover were still pending at this RC5 milestone.
 
 The supported tagged RC5-to-RC6 upgrade updated only the web Worker. Its protected
 D1 restore point matches that exact transition, and in-progress state is cleared.

@@ -3,7 +3,36 @@
 Application: `https://mail.kieng.io.vn`.
 Pilot mail domain: `pilot.kieng.io.vn`. Routing mode: `manual`.
 
-The existing apex MX snapshot (2026-10-05) is:
+## Current status: 2026-10-06
+
+RC9 apex cutover completed at **07:19:40 UTC**. Three literal production
+recipient rules target the existing inbound Worker; native apex sending DKIM
+and monitoring DMARC (`p=none`) are configured. Cloudflare and Google public
+resolver checks passed for the new mail DNS. Before the latest reply test,
+verification preserved ten pre-cutover messages, eleven baseline R2 ciphertext
+objects and the original encryption keys.
+
+The owner identified a Google Workspace catch-all for unrecognized recipients
+and subsequently reported working reply delivery after following routing
+guidance. New Google Admin settings were not independently observed. A read-only
+check at **09:45:58 UTC** confirmed a new production reply receipt from
+**09:45:08 UTC** completed processing. Totals were ten completed inbound
+receipts, two sent outbound submissions and one unchanged historical failure.
+Further metadata checks at **09:47:46 UTC** confirmed that this Gmail reply has
+a stored message, a reply header and one non-inline attachment. The owner
+reported working client delivery; metadata checks do not prove attachment opening.
+
+The other two production accounts still need individual send/Sent/reply/attachment
+and SPF/DKIM/DMARC checks before all-account acceptance. Keep Google available
+through at least
+**2026-10-13 07:19:40 UTC** and until those checks pass, and retain historical
+mail there. See [retained Google routing](OPERATIONS.md#retained-google-workspace-routing).
+The instructions and DNS snapshot below describe the earlier pilot and migration
+procedure; the Google MX snapshot is rollback history, not current public DNS.
+
+## Historical pre-cutover DNS
+
+The apex MX snapshot on 2026-10-05 was:
 
 | Priority | Server |
 | --- | --- |
@@ -13,7 +42,7 @@ The existing apex MX snapshot (2026-10-05) is:
 | 10 | alt3.aspmx.l.google.com |
 | 10 | alt4.aspmx.l.google.com |
 
-Existing SPF: `v=spf1 include:zohomail.com include:_spf.google.com ~all`.
+Pre-cutover SPF: `v=spf1 include:zohomail.com include:_spf.google.com ~all`.
 Re-read and export all current DNS records immediately before any cutover;
 this historical public snapshot is not a complete zone backup.
 
@@ -62,5 +91,6 @@ senders with cached Cloudflare MX, then verify public DNS and send an external
 test to Google. This DNS rollback does not import or move messages that already
 reached the new receiver.
 
-Status: live deployment and mail acceptance must be recorded separately; this
-document does not assert that the cutover has happened.
+Deployment and mail acceptance are recorded separately in the dated current
+status above; the completed cutover does not establish every recipient's
+send/reply/attachment acceptance.
