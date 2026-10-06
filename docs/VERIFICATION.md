@@ -65,6 +65,12 @@ passed all three hosted platforms at `54b0f033d61145747088e022f054dddd5b2fd713`;
 that commit changed only this document from the immutable RC4 tag. RC5
 cross-platform status must be read from its own run, not inferred from RC4.
 
+The [RC5 matrix](https://github.com/longmaba/cloudflare-mail-client/actions/runs/37400041887)
+passed all workflow steps on hosted Linux, Windows and macOS at immutable release
+commit `80225e32cbbec4635af8f30cdee293fc2a0ce2a2`, including all 893 application
+tests, 79 installer tests, checks and builds. Later verification-note updates do
+not change that release tag or its deployed source.
+
 Recovery tests also passed with Windows CRLF checkouts. An actual read-only
 local Wrangler D1 query confirmed that the recovery command preserves JSON
 output while disabling response logs; the focused recovery suite has five tests.
@@ -220,6 +226,18 @@ A read-only comparison against the original DNS snapshot confirmed all five
 Google apex MX records, the apex SPF record and three existing DKIM records
 unchanged. Apex DMARC was absent in both snapshots. No apex migration has been
 performed.
+
+The supported tagged RC4-to-RC5 pilot upgrade completed with its matching protected
+D1 Time Travel record, original database/resources/key fingerprint and cleared
+in-progress state. `setup --prepare-apex` then saved protected full-zone DNS
+evidence and added only the exact staging binding on the existing web Worker.
+All required doctor checks pass, including that binding. A read-only comparison
+confirmed the complete zone DNS unchanged since preparation, and all six public
+pilot/apex DNS checks pass. All four baseline messages still have identical
+encrypted-field and decrypted-content digests, and all five baseline R2 objects
+match the earlier recovery copies. The owner elected to create the separate
+accounts and send invitations personally; live staged-owner setup and apex
+cutover remain pending.
 
 Pending evidence includes a fresh real-account installation, independent
 account/domain installation, interrupted live deployment and upgrade preserving
