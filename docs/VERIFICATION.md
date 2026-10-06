@@ -21,15 +21,13 @@ reply has a stored message, a reply header and one non-inline attachment. The
 owner reported working client delivery; the metadata check does not independently
 prove opening the attachment in the client.
 
-The owners now report all three production accounts passed send, Sent, reply,
-small-attachment opening and SPF/DKIM/DMARC checks. The **09:50 UTC** live database
-check still showed two sent submissions and ten completed inbound receipts,
-without matching new test send/reply records for the other two accounts. Their
-server correlation remains pending, so all-account acceptance is not yet
-confirmed. Their browser checks and the new Google Admin settings were not
-independently observed. Keep Google available through
-at least **2026-10-13 07:19:40 UTC** and until correlation is resolved; retain
-historical mail there.
+Long's production send, Sent, reply, attachment and SPF/DKIM/DMARC checks passed
+according to the owner; the reply and attachment storage are independently
+confirmed above. The other two accounts are configured but their owners have
+not completed the individual mail tests. The owner has deferred those tests;
+all-account verification is not claimed. Google Admin changes were not
+independently observed. Keep Google available through at least
+**2026-10-13 07:19:40 UTC** and retain historical mail there.
 Full operational restore remains open. Older Google-MX and
 four-message preservation/restore results below record pilot milestones and do
 not describe the current apex DNS or full current mailbox contents.
@@ -83,8 +81,8 @@ failed readiness persistence, duplicate/invalid/annotated policy injection and
 policy reversion after readiness. Existing protected journals retain their
 original preview and digest.
 The merged SPF policy resolved to four nested DNS lookups during preflight.
-Subsequent live cutover, reply evidence, owner reports and pending server
-correlation are recorded in the current status above.
+Subsequent live cutover, reply evidence, owner reports and deferred account
+tests are recorded in the current status above.
 
 Tests cover setup locking, domain/recovery identities, expiring single-use reset
 links, administrator security gates, current mailbox grants and assignments,
