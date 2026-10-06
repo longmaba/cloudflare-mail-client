@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { and, desc, eq, gt, sql } from "drizzle-orm";
+import { and, desc, eq, exists, gt, inArray, sql } from "drizzle-orm";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import * as schema from "@doota/db/schema";
 import * as mail from "@doota/db/mail.schema";
@@ -47,6 +47,8 @@ export type ParsedMessage = {
   r2RawKey: string | null;
   /** Inbound identity is the raw content key, never its untrusted Message-ID. */
   dedupeByRaw?: boolean;
+  /** Historical import ancestry must stay inside the destination mailbox. */
+  threadMailboxId?: string;
   /** Aligned DMARC pass at ingest (CF Authentication-Results). Drives the
    * verified-sender shield; absent ⇒ unverified (fail-closed). */
   dmarcPass?: boolean;
@@ -75,11 +77,17 @@ async function findMessageByHeaderId(
   db: Db,
   orgId: string,
   headerId: string,
+  mailboxId?: string,
 ): Promise<{ id: string; threadId: string } | null> {
+  const deliveredHere = mailboxId ? exists(db.select({ one: sql`1` }).from(schema.delivery).where(and(
+    eq(schema.delivery.messageId, schema.message.id),
+    eq(schema.delivery.mailboxId, mailboxId),
+  ))) : undefined;
   const direct = await db.query.message.findFirst({
     where: and(
       eq(schema.message.orgId, orgId),
       eq(schema.message.messageIdHeader, headerId),
+      deliveredHere,
     ),
     columns: { id: true, threadId: true },
   });
@@ -114,7 +122,7 @@ async function findMessageByHeaderId(
   if (!messageId) return null;
   return (
     (await db.query.message.findFirst({
-      where: eq(schema.message.id, messageId),
+      where: and(eq(schema.message.id, messageId), deliveredHere),
       columns: { id: true, threadId: true },
     })) ?? null
   );
@@ -134,7 +142,7 @@ async function resolveThreadId(
   parsed: ParsedMessage,
 ): Promise<string> {
   for (const pid of candidateParentIds(parsed.inReplyTo, parsed.references)) {
-    const parent = await findMessageByHeaderId(db, orgId, pid);
+    const parent = await findMessageByHeaderId(db, orgId, pid, parsed.threadMailboxId);
     if (parent) return parent.threadId;
   }
 
@@ -156,6 +164,9 @@ async function resolveThreadId(
         eq(schema.thread.orgId, orgId),
         eq(schema.thread.subjectNormalized, subjectNorm),
         gt(schema.thread.lastMessageAt, since),
+        parsed.threadMailboxId ? exists(db.select({ one: sql`1` }).from(schema.delivery)
+          .innerJoin(schema.message, eq(schema.message.id, schema.delivery.messageId))
+          .where(and(eq(schema.delivery.mailboxId, parsed.threadMailboxId), eq(schema.message.threadId, schema.thread.id)))) : undefined,
       ),
       orderBy: desc(schema.thread.lastMessageAt),
       columns: { id: true },
@@ -164,7 +175,7 @@ async function resolveThreadId(
     if (candidates.length) {
       const wanted = participantsOf(parsed);
       for (const c of candidates) {
-        if (await threadSharesParticipant(db, c.id, wanted)) return c.id;
+        if (await threadSharesParticipant(db, c.id, wanted, parsed.threadMailboxId)) return c.id;
       }
     }
   }
@@ -174,7 +185,7 @@ async function resolveThreadId(
     .values({
       orgId,
       subjectNormalized: subjectNorm || null,
-      lastMessageAt: parsed.sentAt ? new Date(parsed.sentAt) : new Date(),
+      lastMessageAt: parsed.sentAt != null ? new Date(parsed.sentAt) : new Date(),
     })
     .returning({ id: mail.thread.id });
   return created[0].id;
@@ -257,7 +268,7 @@ export async function materializeMessage(
       toAddrs: JSON.stringify(parsed.to ?? []),
       ccAddrs: JSON.stringify(parsed.cc ?? []),
       replyTo: parsed.replyTo,
-      sentAt: parsed.sentAt ? new Date(parsed.sentAt) : null,
+      sentAt: parsed.sentAt != null ? new Date(parsed.sentAt) : null,
       r2RawKey: parsed.r2RawKey,
       itemType: "external_message",
       contentKind,
@@ -299,10 +310,12 @@ async function threadSharesParticipant(
   db: Db,
   threadId: string,
   wanted: Set<string>,
+  mailboxId?: string,
 ): Promise<boolean> {
   if (wanted.size === 0) return false;
   const msgs = await db.query.message.findMany({
-    where: eq(schema.message.threadId, threadId),
+    where: and(eq(schema.message.threadId, threadId), mailboxId ? exists(db.select({ one: sql`1` }).from(schema.delivery)
+      .where(and(eq(schema.delivery.messageId, schema.message.id), eq(schema.delivery.mailboxId, mailboxId)))) : undefined),
     columns: { fromAddr: true, toAddrs: true, ccAddrs: true },
   });
   for (const m of msgs) {
@@ -326,32 +339,49 @@ function jsonAddrs(json: string | null | undefined): string[] {
 async function bumpThread(db: Db, threadId: string, sentAt: number | null): Promise<void> {
   await db
     .update(mail.thread)
-    .set({ lastMessageAt: new Date(sentAt ?? Date.now()) })
+    .set({ lastMessageAt: sql`MAX(COALESCE(${mail.thread.lastMessageAt}, 0), ${sentAt ?? Date.now()})` })
     .where(eq(mail.thread.id, threadId));
 }
 
 async function writeAttachments(db: Db, messageId: string, parsed: ParsedMessage): Promise<void> {
   if (parsed.attachments.length === 0) return;
-  // Clear + re-insert: attachments are derived from the canonical raw, so a
-  // re-run replaces cleanly (no natural unique key on part metadata).
-  await db.delete(mail.attachment).where(eq(mail.attachment.messageId, messageId));
+  const existing = await db.query.attachment.findMany({ where: eq(schema.attachment.messageId, messageId) });
   // Whether each part is referenced by a cid: in the (quote-stripped) body — the
   // "inline" flag getThread used to derive from the html; computed once here so
   // the read path doesn't need the body. Same basis the body route renders on.
   const displayHtml = parsed.html ? stripQuotesHtml(parsed.html) : null;
-  const rows = parsed.attachments.map((a) => ({
-    messageId,
-    partId: a.partId,
-    filename: a.filename,
-    contentType: a.contentType,
-    size: a.size,
-    r2Key: a.r2Key,
-    inline: isCidReferenced(displayHtml, a.partId),
+  const matched = new Set<string>();
+  const rows = await Promise.all(parsed.attachments.map(async (a, index) => {
+    const previous = existing.find((row) => !matched.has(row.id) && row.r2Key === a.r2Key && row.partId === a.partId && row.filename === a.filename);
+    if (previous) matched.add(previous.id);
+    const digest = previous ? null : await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify([messageId, a.r2Key, a.partId, a.filename, index])));
+    return {
+      // Keep legacy IDs and make interrupted fresh writes converge on the same ID.
+      id: previous?.id ?? `att-${Array.from(new Uint8Array(digest!)).map((byte) => byte.toString(16).padStart(2, "0")).join("")}`,
+      messageId,
+      partId: a.partId,
+      filename: a.filename,
+      contentType: a.contentType,
+      size: a.size,
+      r2Key: a.r2Key,
+      inline: isCidReferenced(displayHtml, a.partId),
+    };
   }));
-  // D1 caps bound parameters at 100/statement; 7 cols → chunk at 10 rows (70
+  if (rows.length === existing.length && rows.every((row) => existing.some((old) =>
+    old.id === row.id && old.partId === row.partId && old.filename === row.filename &&
+    old.contentType === row.contentType && old.size === row.size && old.r2Key === row.r2Key && old.inline === row.inline))) return;
+  // D1 caps bound parameters at 100/statement; chunk at 10 rows (90
   // params) so a message with many attachments doesn't overflow in one INSERT.
   for (let i = 0; i < rows.length; i += 10) {
-    await db.insert(mail.attachment).values(rows.slice(i, i + 10));
+    await db.insert(mail.attachment).values(rows.slice(i, i + 10)).onConflictDoUpdate({ target: mail.attachment.id, set: {
+      partId: sql`excluded.part_id`, filename: sql`excluded.filename`, contentType: sql`excluded.content_type`,
+      size: sql`excluded.size`, r2Key: sql`excluded.r2_key`, inline: sql`excluded.inline`,
+    } });
+  }
+  const retained = new Set(rows.map((row) => row.id));
+  const obsolete = existing.filter((row) => !retained.has(row.id)).map((row) => row.id);
+  for (let i = 0; i < obsolete.length; i += 90) {
+    await db.delete(mail.attachment).where(and(eq(mail.attachment.messageId, messageId), inArray(mail.attachment.id, obsolete.slice(i, i + 90))));
   }
 }
 
@@ -490,7 +520,7 @@ async function ensureThreadState(
     // the top, unread. Only when actually snoozed — SQLite's `UPDATE OF` fires on
     // a watched column merely appearing in SET, and this write runs on every
     // inbound delivery; an unconditional null would burn a change_log seq each time.
-    if (existing.snoozedUntil != null) set.snoozedUntil = null;
+    if (policy.unarchiveOnReply && existing.snoozedUntil != null) set.snoozedUntil = null;
   }
   // Resurfacing on a new reply follows placement_origin (build guide, Phase 1):
   //   user/default archived → back to inbox (the reply needs attention);

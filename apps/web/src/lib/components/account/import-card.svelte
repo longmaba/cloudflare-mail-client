@@ -16,14 +16,13 @@
 	import { Skeleton } from '$lib/components/ui/skeleton/index.js';
 	import { Spinner } from '$lib/components/ui/spinner/index.js';
 	import SettingsCollapsibleCard from '$lib/components/account/settings-collapsible-card.svelte';
-	import { myMailboxes } from '$lib/rpc/mailbox.remote';
-	import { beginImport, completeImport, abortImport, importStatus } from '$lib/rpc/import.remote';
+	import { beginImport, completeImport, abortImport, retryImport, importStatus, importableMailboxes } from '$lib/rpc/import.remote';
 	import { uploadMbox, UploadAborted } from '$lib/client/import-upload';
 	import { errorMessage } from '$lib/utils/error-message';
 
 	let { mailboxId = null }: { mailboxId?: string | null } = $props();
 
-	const mailboxes = myMailboxes();
+	const mailboxes = importableMailboxes();
 	const visible = $derived(
 		mailboxes.current === undefined
 			? undefined
@@ -40,30 +39,41 @@
 
 	const LIVE_STATUSES = ['uploading', 'queued', 'running'];
 
-	// Rows are held in local state and fetched explicitly, rather than read off
-	// `importStatus(...).current`. The query-cache route looked right and did not
-	// work: the polls returned 200 with a real payload while `.current` stayed
-	// undefined, so the card rendered a skeleton forever. A remote query is also
-	// awaitable, and awaiting it is unambiguous — no cache-key or
-	// active-use lifetime to reason about.
+	// Background queue writes cannot invalidate the browser's remote-query
+	// cache. Refresh before every poll, then await that fresh result into local
+	// state; awaiting the cached query alone leaves old status on screen.
 	type ImportRow = Awaited<ReturnType<typeof importStatus>>[number];
 	let rowsByBox = $state<Record<string, ImportRow[]>>({});
 	let loaded = $state(false);
+	let loadError = $state<string | null>(null);
 	/** Keep polling briefly after handing off to the queue, even if the row isn't
 	 * live *yet* — the job may not have picked it up when we first look. */
 	let pollUntil = $state(0);
 
 	async function loadRows(ids: string[]) {
-		const pairs = await Promise.all(
-			ids.map(async (id) => [id, await importStatus({ mailboxId: id })] as const)
-		);
-		for (const [id, rows] of pairs) rowsByBox[id] = rows;
-		loaded = true;
+		try {
+			const pairs = await Promise.all(
+				ids.map(async (id) => {
+					const progress = importStatus({ mailboxId: id });
+					await progress.refresh();
+					return [id, await progress] as const;
+				})
+			);
+			for (const [id, rows] of pairs) rowsByBox[id] = rows;
+			loadError = null;
+		} catch {
+			loadError = 'Import progress could not be loaded. Refresh or try again shortly.';
+		} finally {
+			loaded = true;
+		}
 	}
 
 	$effect(() => {
 		const ids = (visible ?? []).map((box) => box.id);
-		if (!ids.length) return;
+		if (!ids.length) {
+			loaded = visible !== undefined;
+			return;
+		}
 		void loadRows(ids);
 		// The effect body depends only on `ids`, deliberately: an earlier version
 		// tested row state here to decide whether to start the timer, which made
@@ -85,9 +95,10 @@
 	// needs to set a file on it.
 	let fileInput = $state<HTMLInputElement | null>(null);
 	let pendingBox = $state<string | null>(null);
-	let pendingResume = $state<{ id: string; partCount: number } | null>(null);
+	type ResumeSource = { id: string; filename: string; sizeBytes: number };
+	let pendingResume = $state<ResumeSource | null>(null);
 
-	function pickAndUpload(boxId: string, resumeOf?: { id: string; partCount: number }) {
+	function pickAndUpload(boxId: string, resumeOf?: ResumeSource) {
 		pendingBox = boxId;
 		pendingResume = resumeOf ?? null;
 		if (fileInput) fileInput.value = ''; // re-picking the same file must still fire change
@@ -99,6 +110,14 @@
 		const resumeOf = pendingResume;
 		const file = fileInput?.files?.[0];
 		if (!boxId || !file) return;
+		if (!/\.(?:mbox|eml)$/i.test(file.name)) {
+			toast.error('Extract the download first, then choose its .mbox or .eml file.');
+			return;
+		}
+		if (resumeOf && (file.name.trim() !== resumeOf.filename || file.size !== resumeOf.sizeBytes)) {
+			toast.error('Resume with the same filename and size as the original archive. Cancel the old import to choose another file.');
+			return;
+		}
 		uploading = boxId;
 		uploadPercent = 0;
 		controller = new AbortController();
@@ -113,7 +132,6 @@
 				resumeOf?.id ??
 				(await beginImport({ mailboxId: boxId, filename: file.name, sizeBytes: file.size })).importId;
 			await uploadMbox(file, importId, {
-				fromPart: resumeOf?.partCount ?? 0,
 				signal: controller.signal,
 				onProgress: (p) => (uploadPercent = Math.round((p.uploadedBytes / p.totalBytes) * 100))
 			});
@@ -132,12 +150,23 @@
 	}
 
 	async function cancel(boxId: string, importId: string) {
-		controller?.abort();
+		if (uploading === boxId) controller?.abort();
 		try {
 			await abortImport({ mailboxId: boxId, importId });
 			await loadRows([boxId]);
 		} catch (err) {
 			toast.error(errorMessage(err, 'Could not cancel the import.'));
+		}
+	}
+
+	async function retry(boxId: string, importId: string) {
+		try {
+			await retryImport({ mailboxId: boxId, importId });
+			pollUntil = Date.now() + 10 * 60 * 1000;
+			await loadRows([boxId]);
+			toast.success('Retry queued from the last saved checkpoint.');
+		} catch (err) {
+			toast.error(errorMessage(err, 'Could not retry the import.'));
 		}
 	}
 
@@ -189,14 +218,17 @@
 		{/if}
 	{/snippet}
 	<Card.CardDescription>
-		Bring mail in from a standard .mbox file — a Doota export, a Gmail Takeout archive, or a backup
-		from most other mail apps.
+		Import an extracted Gmail Takeout or other .mbox archive, or a single .eml message.
+		Extract ZIP downloads before choosing the mail file.
 	</Card.CardDescription>
 	<div class="flex flex-col gap-5">
+		{#if loadError}
+			<p class="text-destructive text-sm" role="alert">{loadError}</p>
+		{/if}
 		{#if visible === undefined}
 			<Skeleton class="h-8 w-full rounded-md" />
 		{:else if visible.length === 0}
-			<p class="text-muted-foreground text-sm">You don't have any mailboxes yet.</p>
+			<p class="text-muted-foreground text-sm">Import requires an active mailbox you have permission to manage.</p>
 		{:else}
 			{#each visible as box (box.id)}
 				{@const rows = rowsByBox[box.id] ?? []}
@@ -212,10 +244,9 @@
 								<Button size="sm" variant="outline" onclick={() => controller?.abort()}>Stop</Button>
 							</div>
 						{:else if live?.status === 'uploading'}
-							<!-- The upload was interrupted. The parts already stored are still
-							     good, so re-picking the same file continues from where it left off. -->
+							<!-- Revalidate every staged chunk before continuing the same file. -->
 							<Button size="sm" variant="outline" class="shrink-0"
-								onclick={() => pickAndUpload(box.id, { id: live.id, partCount: live.partCount })}>
+								onclick={() => pickAndUpload(box.id, { id: live.id, filename: live.filename, sizeBytes: live.sizeBytes })}>
 								Resume upload
 							</Button>
 						{:else if !live}
@@ -229,10 +260,9 @@
 									<AlertDialog.Header>
 										<AlertDialog.Title>Import into {box.address}?</AlertDialog.Title>
 										<AlertDialog.Description>
-											Imported mail lands in <strong>Archive</strong> under a dated
-											<strong>Imported</strong> label — not your inbox — so it doesn't bury what's
-											already here. Nothing is sent, and no auto-replies go out. Remove the label's
-											mail later if you change your mind.
+											Messages receive a dated <strong>Imported</strong> label. Gmail folder labels,
+											read state and attachments are restored when present. Mail without folder
+											metadata starts in <strong>Archive</strong>. Nothing is sent and no auto-replies go out.
 											<br /><br />
 											Keep this tab open while the file uploads. After that the import runs in the
 											background and you can close it.
@@ -263,19 +293,23 @@
 											<Button size="sm" variant="ghost" class="h-7 shrink-0" onclick={() => cancel(box.id, row.id)}>
 												Cancel
 											</Button>
+										{:else if row.status === 'failed'}
+											<Button size="sm" variant="outline" class="h-7 shrink-0" disabled={!!live} onclick={() => retry(box.id, row.id)}>
+												Retry import
+											</Button>
 										{/if}
 									</div>
 									{#if row.status === 'running'}
 										<!-- Byte-based: the message total isn't knowable until the file
 										     has been read, so a real fraction beats an invented ETA. -->
-										<div class="bg-muted h-1 overflow-hidden rounded-full" role="progressbar"
+										<div class="bg-muted h-1 overflow-hidden rounded-full" role="progressbar" aria-label="Archive import progress"
 											aria-valuenow={row.percent} aria-valuemin={0} aria-valuemax={100}>
 											<div class="bg-primary h-full transition-[width]" style="width:{row.percent}%"></div>
 										</div>
 									{/if}
 									<span class="text-muted-foreground">
 										{row.messageCount} imported{row.skippedCount ? ` · ${row.skippedCount} already here` : ''}{row.failedCount
-											? ` · ${row.failedCount} unreadable`
+												? ` · ${row.failedCount} failed`
 											: ''} · {when(row.completedAt ?? row.createdAt)}
 									</span>
 									{#if row.error}

@@ -24,7 +24,7 @@ export type MailEnv = {
   MAIL_RAW: R2Bucket;
   // Also carries rule-backfill + mailbox-export jobs (same consumer, routed by `kind`).
   MAIL_QUEUE: Queue<
-    InboundJob | import("./rules-backfill").RuleBackfillJob | import("./export").MailboxExportJob
+    InboundJob | import("./rules-backfill").RuleBackfillJob | import("./export").MailboxExportJob | import("./import").MailboxImportJob
   >;
   MAIL_DEK: string;
   MAIL_SEARCH_KEY: string;

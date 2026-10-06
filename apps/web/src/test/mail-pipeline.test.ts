@@ -376,7 +376,7 @@ describe("thread visibility (personal vs shared)", () => {
     expect(support?.items.map((item: any) => item.id).sort()).toEqual([m1.messageId, m2.messageId].sort());
   });
 
-  it("a reply whose parent this mailbox can't see carries replyContext (added on Cc)", async () => {
+  it("a personal mailbox added on Cc cannot read a stored parent it was never delivered", async () => {
     const ck = deps.ck;
     // Original went to the shared mailbox only — alice was never on it.
     const p1 = parsed({ messageIdHeader: "<c1@ext>", subject: "Deal", text: "the original context here" });
@@ -390,9 +390,8 @@ describe("thread visibility (personal vs shared)", () => {
     const alice = await getThread(db, { threadId: m1.threadId, mailboxId: "mb_apex", ck });
     expect(alice?.items.map((item: any) => item.id)).toEqual([m2.messageId]); // only the reply is visible
     const ctx = (alice?.items[0] as any).replyContext;
-    expect(ctx?.from).toBe("ext@sender.com");
-    expect(ctx?.parentId).toBeNull(); // no access → not a jump link
-    expect(ctx?.text).toBe("the original context here"); // FULL parent, not a snippet
+    expect(ctx).toBeUndefined();
+    expect(JSON.stringify(alice)).not.toContain("the original context here");
   });
 
   it("every reply to a visible message gets a clickable jump reference (WhatsApp-style)", async () => {

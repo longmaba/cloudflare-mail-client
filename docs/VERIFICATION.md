@@ -1,6 +1,6 @@
 # Release verification
 
-Release candidate: `v0.1.0-rc.9`. Verification date: 2026-10-06.
+Release candidate: `v0.1.0-rc.10`. Verification date: 2026-10-06.
 
 ## Current live status: 2026-10-06
 
@@ -40,11 +40,27 @@ On Windows with Node 24.12.0 and pnpm 10.26.2:
 | --- | --- |
 | Frozen workspace and infrastructure installs | Passed |
 | Workspace type and Svelte checks | Passed, zero errors and warnings |
-| Application tests | 87 files, 941 tests passed |
+| Application tests | 91 files, 999 tests passed |
 | Portable installer tests | 142 tests passed; migration planning/apply/rollback, snapshots/bindings, credential replacement, API adapters and pre-upgrade restore points |
 | Infrastructure TypeScript check | Passed |
 | Production Cloudflare build | Passed |
-| Local D1 migrations | All migrations through `0058` applied |
+| Local D1 migrations | Runtime fixtures apply all migrations through `0059` |
+
+RC10 repairs historical MBOX/EML import with mailbox-scoped raw-content identity
+and reply ancestry, encrypted extracted attachments, Gmail labels and read/starred
+flags, Sent copies and mixed Inbox/Sent conversations. The upload boundary checks
+fresh manager grants, fixed part lengths, immutable chunk hashes and completeness.
+Processing uses leases, per-message durable outcomes, conditional checkpoints and
+scheduled recovery. Cancellation preserves staged mail and cannot be overwritten
+by a running batch. Import failures retain the archive instead of reporting a
+false success or dropping messages.
+
+Regressions cover forged Message-ID/References, cross-mailbox previews and stored
+reply context, attachment link stability, interrupted D1/R2/queue work, large MIME,
+16 MiB window boundaries, user read/unread overrides and preservation of existing
+thread placement/snoozing. A synthetic 25 MiB MIME attachment completes in the
+local test runtime. This is separate from a deployed Cloudflare memory/load test.
+See [Gmail import](GMAIL-IMPORT.md) for formats, limits and recovery instructions.
 
 The RC7 migration tests cover exact owner readiness and mandatory administrator
 TOTP, read-only fresh plans, digest confirmation, scope/identity/key checks,
@@ -351,7 +367,8 @@ production, not conclusions drawn from mocked tests.
 Inherited service-key sending has a separate consumer identity limitation;
 service API authorization/enqueue tests do not prove service-key delivery.
 The supported v1 acceptance target is the interactive domain email client.
-IMAP/native desktop clients, historical import and bulk marketing are outside v1.
+IMAP/native desktop clients and bulk marketing are outside v1. Historical mail
+import is supported with the documented limits starting with RC10.
 
 Use [OPERATIONS.md](OPERATIONS.md) for acceptance and recovery checks, and
 [KIENG-PILOT.md](KIENG-PILOT.md) for the first deployment and DNS rollback.

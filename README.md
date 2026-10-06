@@ -121,8 +121,13 @@ Follow the [dashboard walkthrough](docs/TOKENS.md) for token creation and accoun
   delivery needs these rules; an apex catch-all alone is insufficient.
   [Subdomain rules](https://developers.cloudflare.com/email-service/configuration/subdomains/).
 
-This v1 deployment supports the web client. Historical mailbox import and
-IMAP/native desktop clients are outside v1. Bulk marketing is excluded; follow
+Gmail Takeout `.mbox` and individual `.eml` imports preserve messages,
+attachments, dates, visible recipients, Gmail labels, read/starred state and
+Sent placement. See [Gmail migration](docs/GMAIL-IMPORT.md) for the supported
+formats, message-size limit and recovery steps.
+
+This deployment supports the web client. IMAP/native desktop clients are
+outside v1. Bulk marketing is excluded; follow
 Cloudflare's [transactional sending scope](https://developers.cloudflare.com/email-service/reference/faq/).
 
 ## Screenshots and operations

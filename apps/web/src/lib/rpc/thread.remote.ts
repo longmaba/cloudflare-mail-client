@@ -623,26 +623,16 @@ export const bulkMarkRead = command(
       threadIds = mine.map((row) => row.threadId);
       if (!threadIds.length) return { ok: true as const };
     }
-    if (read) {
-      const now = new Date();
+    // The earliest valid Date overrides imported flags, including pre-1970 mail.
+    const now = read ? new Date() : new Date(-8_640_000_000_000_000);
+    for (let offset = 0; offset < threadIds.length; offset += 10) {
       await locals.db
         .insert(mail.threadRead)
-        .values(threadIds.map((threadId) => ({ orgId: box.orgId, userId, threadId, mailboxId, lastReadAt: now })))
+        .values(threadIds.slice(offset, offset + 10).map((threadId) => ({ orgId: box.orgId, userId, threadId, mailboxId, lastReadAt: now })))
         .onConflictDoUpdate({
           target: [mail.threadRead.userId, mail.threadRead.threadId, mail.threadRead.mailboxId],
           set: { lastReadAt: now },
         });
-    } else {
-      // Unread = no read marker newer than the thread; deleting the marker restores it.
-      await locals.db
-        .delete(mail.threadRead)
-        .where(
-          and(
-            eq(mail.threadRead.userId, userId),
-            eq(mail.threadRead.mailboxId, mailboxId),
-            inArray(mail.threadRead.threadId, threadIds),
-          ),
-        );
     }
     return { ok: true as const };
   },

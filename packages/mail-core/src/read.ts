@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { and, asc, desc, eq, exists, gt, inArray, isNotNull, isNull, lt, notInArray, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, exists, gt, inArray, isNotNull, isNull, notInArray, or, sql } from "drizzle-orm";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import * as schema from "@doota/db/schema";
 import { decryptContent, type ContentKey } from "./crypto";
@@ -23,6 +23,30 @@ type Db = DrizzleD1Database<typeof schema>;
 // D1 permits 100 bound parameters; leave room for mailbox/user filters.
 // https://developers.cloudflare.com/d1/platform/limits/
 const THREAD_QUERY_BATCH = 90;
+
+// Imported flags seed unread state until this user explicitly reads/unreads the
+// thread. Ordinary mail keeps the existing cursor and activity semantics.
+function unreadPredicate(personal: boolean) {
+  const activity = personal ? sql`COALESCE(${schema.threadState.lastInboundAt},
+    (SELECT MAX(m.sent_at) FROM delivery d JOIN message m ON m.id = d.message_id
+      WHERE d.mailbox_id = ${schema.threadState.mailboxId} AND m.thread_id = ${schema.threadState.threadId}
+      AND instr(d.keywords, '"$imported"') > 0))` : schema.threadState.lastActivityAt;
+  const relevantRole = personal ? sql`AND (d.role != 'from' OR instr(d.keywords, '"$imported"') > 0)` : sql``;
+  const initialUnread = sql`(
+    NOT EXISTS (SELECT 1 FROM delivery d JOIN message m ON m.id = d.message_id
+      WHERE d.mailbox_id = ${schema.threadState.mailboxId} AND m.thread_id = ${schema.threadState.threadId}
+      AND instr(d.keywords, '"$imported"') > 0)
+    OR EXISTS (SELECT 1 FROM delivery d JOIN message m ON m.id = d.message_id
+      WHERE d.mailbox_id = ${schema.threadState.mailboxId} AND m.thread_id = ${schema.threadState.threadId}
+      AND d.is_read = 0 ${relevantRole})
+    OR ${schema.threadState.lastActivityAt} > (SELECT COALESCE(MAX(m.sent_at), 0) FROM delivery d JOIN message m ON m.id = d.message_id
+      WHERE d.mailbox_id = ${schema.threadState.mailboxId} AND m.thread_id = ${schema.threadState.threadId})
+  )`;
+  return and(isNotNull(activity), or(
+    and(isNull(schema.threadRead.lastReadAt), initialUnread),
+    sql`${activity} > ${schema.threadRead.lastReadAt}`,
+  ));
+}
 
 /**
  * Read model. A thread DTO is assembled from thread + messages + this mailbox's
@@ -263,6 +287,20 @@ async function projectThreadRows(
   // Latest message per thread (subject + snippet + from) in one window-function
   // query instead of a findFirst per row — uses message_thread_sent_idx.
   const threadIds = states.map((s) => s.threadId);
+  const importedRead = new Map<string, { unread: boolean; latestReceiptAt: number; latestImportedAt: number }>();
+  if (threadIds.length) {
+    const idList = sql.join(threadIds.map((id) => sql`${id}`), sql`, `);
+    const role = listBox?.isPersonal ? sql`AND (d.role != 'from' OR instr(d.keywords, '"$imported"') > 0)` : sql``;
+    const flags = await db.all<{ threadId: string; hasImport: number; unread: number; latestReceiptAt: number; latestImportedAt: number }>(sql`
+      SELECT m.thread_id AS "threadId", MAX(instr(d.keywords, '"$imported"') > 0) AS "hasImport",
+        MAX(CASE WHEN d.is_read = 0 ${role} THEN 1 ELSE 0 END) AS "unread",
+        COALESCE(MAX(m.sent_at), 0) AS "latestReceiptAt",
+        COALESCE(MAX(CASE WHEN instr(d.keywords, '"$imported"') > 0 THEN m.sent_at END), 0) AS "latestImportedAt"
+      FROM delivery d JOIN message m ON m.id = d.message_id
+      WHERE d.mailbox_id = ${mailboxId} AND m.thread_id IN (${idList}) GROUP BY m.thread_id
+    `);
+    for (const row of flags) if (row.hasImport) importedRead.set(row.threadId, { unread: !!row.unread, latestReceiptAt: Number(row.latestReceiptAt), latestImportedAt: Number(row.latestImportedAt) });
+  }
   type LatestRow = {
     threadId: string;
     subjectEnc: string | null;
@@ -347,10 +385,13 @@ async function projectThreadRows(
       // definition. Shared: any activity after the cursor counts (the sender's
       // own cursor is bumped at send time in sendDraft).
       unread: (() => {
+        const imported = importedRead.get(s.threadId);
         const newestRelevantAt = listBox?.isPersonal
-          ? (s.lastInboundAt?.getTime() ?? null)
+          ? (s.lastInboundAt?.getTime() ?? imported?.latestImportedAt ?? null)
           : (s.lastActivityAt?.getTime() ?? lastMessageAt);
-        return newestRelevantAt != null && (lastReadAt == null || lastReadAt < newestRelevantAt);
+        if (newestRelevantAt == null) return false;
+        if (lastReadAt == null && imported) return imported.unread || (s.lastActivityAt?.getTime() ?? 0) > imported.latestReceiptAt;
+        return lastReadAt == null || lastReadAt < newestRelevantAt;
       })(),
       hasNotes: notedThreads.has(s.threadId),
       assigneeUserId: opts.includeCollab ? s.assigneeUserId : null,
@@ -471,11 +512,7 @@ export async function recentUnread(
         isNull(schema.threadState.hiddenAt),
         isNull(schema.threadState.snoozedUntil), // snoozed = out of inbox, not unread
         restricted,
-        isNotNull(schema.threadState.lastInboundAt),
-        or(
-          isNull(schema.threadRead.lastReadAt),
-          gt(schema.threadState.lastInboundAt, schema.threadRead.lastReadAt),
-        ),
+        unreadPredicate(true),
       ),
     )
     .orderBy(desc(schema.threadState.lastInboundAt))
@@ -485,8 +522,10 @@ export async function recentUnread(
   // parallel findFirst each is cheaper than a window query.
   return Promise.all(
     states.map(async (s) => {
+      const box = await db.query.mailbox.findFirst({ where: eq(schema.mailbox.id, s.mailboxId), columns: { isPersonal: true } });
       const m = await db.query.message.findFirst({
-        where: eq(schema.message.threadId, s.threadId),
+        where: and(eq(schema.message.threadId, s.threadId), box?.isPersonal ? exists(db.select({ one: sql`1` }).from(schema.delivery)
+          .where(and(eq(schema.delivery.messageId, schema.message.id), eq(schema.delivery.mailboxId, s.mailboxId)))) : undefined),
         orderBy: desc(schema.message.sentAt),
         columns: { fromAddr: true, fromName: true, subjectEnc: true, sentAt: true },
       });
@@ -521,18 +560,7 @@ export async function countUnread(
   //    nothing inbound has landed, so an own-sent-only thread is never unread).
   //  - shared: the whole conversation is visible → last_activity_at (mirrors
   //    thread.last_message_at, the prior authority).
-  const newerThanCursor = mbox?.isPersonal
-    ? and(
-        isNotNull(schema.threadState.lastInboundAt),
-        or(
-          isNull(schema.threadRead.lastReadAt),
-          gt(schema.threadState.lastInboundAt, schema.threadRead.lastReadAt),
-        ),
-      )
-    : or(
-        isNull(schema.threadRead.lastReadAt),
-        lt(schema.threadRead.lastReadAt, schema.threadState.lastActivityAt),
-      );
+  const newerThanCursor = unreadPredicate(!!mbox?.isPersonal);
 
   const rows = await db
     .select({ n: sql<number>`count(*)` })
@@ -572,18 +600,7 @@ export async function countUnreadByLabel(
     where: eq(schema.mailbox.id, input.mailboxId),
     columns: { isPersonal: true },
   });
-  const newerThanCursor = mbox?.isPersonal
-    ? and(
-        isNotNull(schema.threadState.lastInboundAt),
-        or(
-          isNull(schema.threadRead.lastReadAt),
-          gt(schema.threadState.lastInboundAt, schema.threadRead.lastReadAt),
-        ),
-      )
-    : or(
-        isNull(schema.threadRead.lastReadAt),
-        lt(schema.threadRead.lastReadAt, schema.threadState.lastActivityAt),
-      );
+  const newerThanCursor = unreadPredicate(!!mbox?.isPersonal);
   const rows = await db
     .select({ labelId: schema.threadLabel.labelId, n: sql<number>`count(*)` })
     .from(schema.threadLabel)
@@ -705,7 +722,7 @@ export async function getThread(
   // Header index + the reply-parents this mailbox can't see (Cc-added case) —
   // computed now so the hidden-parent fetch joins the one parallel batch below.
   const visibleByHeader = new Map(messages.map((m) => [m.messageIdHeader, m]));
-  const hiddenHeaders = [
+  const hiddenHeaders = mbox?.isPersonal ? [] : [
     ...new Set(
       messages.map((m) => m.inReplyTo).filter((h): h is string => !!h && !visibleByHeader.has(h)),
     ),
@@ -915,11 +932,8 @@ export async function getThread(
   // Reply context per message. Two shapes:
   //  - parent is visible → a one-line preview that links to it, so a reply to an
   //    older message can jump back.
-  //  - parent not visible (a personal mailbox added on Cc) → the full parent text,
-  //    because a half-shown message is worse than none, plus the hidden ancestor
-  //    chain above it (`ancestors`, oldest first), so the newcomer gets the whole
-  //    conversation, not one hop. The walk stops at a visible message (the reader
-  //    can scroll to it) or a gap; depth cap guards cycles.
+  // A personal mailbox cannot borrow a stored ancestor it was not delivered.
+  // Quotes actually present in its received MIME remain part of that message.
   const replyContextByMsg = new Map<
     string,
     {
@@ -948,6 +962,7 @@ export async function getThread(
           text: preview(await decryptContent(input.ck, visibleParent.bodyStrippedEnc), 120) ?? "",
         });
       } else {
+        if (mbox?.isPersonal) continue;
         // Walk the hidden chain: immediate parent + any older hidden ancestors.
         const chain: (typeof messages)[number][] = [];
         const seen = new Set<string>();
@@ -1000,7 +1015,8 @@ export async function getThread(
     ]);
     const d = deliveryByMsg.get(m.id);
     const sentAt = m.sentAt ? m.sentAt.getTime() : null;
-    const isRead = readCursor != null && sentAt != null && sentAt <= readCursor;
+    const isRead = readCursor != null ? sentAt != null && sentAt <= readCursor
+      : safeJsonArray(d?.keywords).includes("$imported") && !!d?.isRead;
     const dto: MessageDTO = {
       type: "external_message",
       id: m.id,

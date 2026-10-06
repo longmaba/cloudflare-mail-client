@@ -1,426 +1,433 @@
 // SPDX-License-Identifier: Apache-2.0
-// Mailbox import — export's mirror. A browser slices an mbox into fixed-size
-// plaintext chunks; each lands as its own encrypted R2 object; a resumable job
-// walks them and materializes messages through the normal path.
-//
-// Why part objects and not an R2 multipart upload: putEncryptedBlob gzips and
-// encrypts the whole object, and a whole-object cipher cannot be range-read —
-// which the byte cursor depends on. Fixing the PLAINTEXT chunk size instead
-// keeps `offset → part index` a division, and every byte stays encrypted at
-// rest. Same layout export already uses.
-//
-// The job deliberately does NOT run the inbound stages. Rules, vacation and
-// notify are all wrong for archived mail: nobody wants auto-replies to
-// five-year-old threads or forty thousand push notifications.
-import { and, eq } from "drizzle-orm";
-import PostalMime from "postal-mime";
+// Historical MIME bypasses inbound rules, vacation replies and notifications.
+import { and, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import PostalMime, { decodeWords } from "postal-mime";
 import * as mail from "@doota/db/mail.schema";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import * as schema from "@doota/db/schema";
 import { getDecryptedBlob, putEncryptedBlob, type ContentKey } from "./crypto.js";
+import { contentHash } from "./inbound-receipts.js";
 import { materializeMessage, materializeDelivery, type ParsedMessage } from "./materialize.js";
 import { createLabel, applyLabel } from "./labels.js";
 import { log } from "./log.js";
 
 type Db = DrizzleD1Database<typeof schema>;
-
+type ImportRow = typeof mail.mailImport.$inferSelect;
+type Outcome = "imported" | "skipped";
 export type MailboxImportJob = { kind: "mailbox_import"; importId: string };
-
-/** Plaintext bytes per uploaded chunk. The client MUST slice on exactly this
- * boundary (except the final chunk) or the cursor→part arithmetic breaks. */
 export const PART_PLAINTEXT_BYTES = 8 * 1024 * 1024;
-
-// Work ceilings for one invocation — whichever trips first.
-//
-// Each message costs a MIME parse, an encrypted R2 put, a handful of sequential
-// D1 round-trips and an FTS index write, so a batch sized like export's (which
-// only reads and concatenates) overruns the invocation. When that happens the
-// cursor is never written, the job retries from the same offset, and it wedges
-// permanently — status `running`, cursor 0, forever. Found exactly that way on
-// a 120-message file.
-//
-// The time budget is the real guard: it adapts to whatever the runtime and the
-// data actually cost, where a tuned message count only encodes today's guess.
+export const MAX_IMPORT_MESSAGE_BYTES = 25 * 1024 * 1024;
 const MAX_MESSAGES_PER_RUN = 12;
-const MAX_BYTES_PER_RUN = 16 * 1024 * 1024;
+const WINDOW_BYTES = 16 * 1024 * 1024;
 const TIME_BUDGET_MS = 12_000;
+const LEASE_MS = 15 * 60_000;
+const RETRY_MS = 60_000;
+const MAX_ATTEMPTS = 10;
+const INCOMPLETE = "The archive upload is incomplete. Resume using the same file.";
+const DIFFERENT = "This chunk differs from the original archive. Resume using the same file.";
+const OVERSIZED = "A message exceeds the 25 MiB MIME limit. The archive and checkpoint were retained. Extract or split the oversized message before importing the remaining mail.";
+class ImportArchiveError extends Error {}
 
 export function importPartKey(orgId: string, importId: string, index: number): string {
   return `import/${orgId}/${importId}/part-${String(index).padStart(5, "0")}`;
 }
-
-// ------------------------------------------------------------------ mbox ---
-// mbox is not one format. Our own export writes RFC 4155 escaping; Gmail
-// Takeout writes mboxrd; Apple writes mboxcl2. They agree on one thing: a
-// message starts at a line beginning "From ". Be liberal about the rest.
-
-const FROM_ = [0x46, 0x72, 0x6f, 0x6d, 0x20]; // "From "
-
-/** Is there a `From ` line starting at `at`? (Caller guarantees line start.) */
+const FROM_ = [0x46, 0x72, 0x6f, 0x6d, 0x20];
 function isFromLine(bytes: Uint8Array, at: number): boolean {
-  if (at + FROM_.length > bytes.length) return false;
-  for (let i = 0; i < FROM_.length; i++) if (bytes[at + i] !== FROM_[i]) return false;
-  return true;
+  return at + FROM_.length <= bytes.length && FROM_.every((b, i) => bytes[at + i] === b);
 }
-
-/**
- * Byte offset of the next message separator strictly after `from`, or -1.
- * A separator is a "From " at the very start of the buffer or immediately
- * after a newline.
- */
 export function nextSeparator(bytes: Uint8Array, from: number): number {
   for (let i = Math.max(from, 0); i < bytes.length; i++) {
-    if (bytes[i] !== 0x0a) continue; // '\n'
-    if (isFromLine(bytes, i + 1)) return i + 1;
+    if (bytes[i] === 0x0a && isFromLine(bytes, i + 1)) return i + 1;
   }
   return -1;
 }
-
-/**
- * Undo mbox body escaping: a line of `>From `, `>>From `, … loses one `>`.
- * Leaves everything else byte-identical, so attachments survive.
- */
+/** Undo one level of mboxrd escaping without decoding attachment bytes. */
 export function unescapeMboxBody(bytes: Uint8Array): Uint8Array {
+  let escaped = false;
+  for (let i = 0; i < bytes.length; i++) {
+    if ((i === 0 || bytes[i - 1] === 0x0a) && bytes[i] === 0x3e) {
+      let j = i;
+      while (bytes[j] === 0x3e) j++;
+      if (isFromLine(bytes, j)) { escaped = true; break; }
+    }
+  }
+  if (!escaped) return bytes;
   const out = new Uint8Array(bytes.length);
   let w = 0;
-  let atLineStart = true;
+  let lineStart = true;
   for (let i = 0; i < bytes.length; i++) {
-    if (atLineStart && bytes[i] === 0x3e) {
-      // '>' — only strip when the run of '>' is followed by "From "
+    if (lineStart && bytes[i] === 0x3e) {
       let j = i;
       while (j < bytes.length && bytes[j] === 0x3e) j++;
       if (isFromLine(bytes, j)) {
-        i++; // drop exactly one '>'
-        atLineStart = false;
+        i++;
+        lineStart = false;
         if (i < bytes.length) out[w++] = bytes[i];
         continue;
       }
     }
     out[w++] = bytes[i];
-    atLineStart = bytes[i] === 0x0a;
+    lineStart = bytes[i] === 0x0a;
   }
   return out.subarray(0, w);
 }
-
-/** Strip the leading `From ` envelope line — it is a separator, not a header. */
-function stripEnvelopeLine(bytes: Uint8Array): Uint8Array {
-  if (!isFromLine(bytes, 0)) return bytes;
-  const nl = bytes.indexOf(0x0a);
-  return nl === -1 ? bytes.subarray(0, 0) : bytes.subarray(nl + 1);
+function expectedParts(size: number): number {
+  if (!Number.isSafeInteger(size) || size <= 0) throw new Error("Choose a non-empty MBOX or EML file.");
+  return Math.ceil(size / PART_PLAINTEXT_BYTES);
 }
-
-// ------------------------------------------------------------- part reads ---
-
-/** Concatenated plaintext of parts covering [start, start+want), clipped to EOF. */
-async function readFrom(
-  env: { MAIL_RAW: R2Bucket },
-  ck: ContentKey,
-  orgId: string,
-  importId: string,
-  partCount: number,
-  start: number,
-  want: number,
-): Promise<Uint8Array> {
-  const firstPart = Math.floor(start / PART_PLAINTEXT_BYTES);
-  const lastPart = Math.min(partCount - 1, Math.floor((start + want - 1) / PART_PLAINTEXT_BYTES));
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  for (let index = firstPart; index <= lastPart; index++) {
-    const bytes = await getDecryptedBlob(env.MAIL_RAW, importPartKey(orgId, importId, index), ck);
-    if (!bytes) break; // a missing part truncates rather than throwing — the run ends early
-    const view = new Uint8Array(bytes);
-    chunks.push(view);
-    total += view.length;
-  }
-  const joined = new Uint8Array(total);
-  let at = 0;
-  for (const chunk of chunks) {
-    joined.set(chunk, at);
-    at += chunk.length;
-  }
-  return joined.subarray(start - firstPart * PART_PLAINTEXT_BYTES);
+function expectedPartSize(row: ImportRow, index: number): number {
+  const count = expectedParts(row.sizeBytes);
+  if (!Number.isSafeInteger(index) || index < 0 || index >= count) throw new Error("Invalid archive chunk index.");
+  return Math.min(PART_PLAINTEXT_BYTES, row.sizeBytes - index * PART_PLAINTEXT_BYTES);
 }
-
-/** Same shape handleEmail uses to key a raw off its Message-ID. */
-function safeKey(messageIdHeader: string): string {
-  return messageIdHeader.replace(/[^a-zA-Z0-9._@-]/g, "_").slice(0, 200);
+async function ownedMailbox(db: Db, row: Pick<ImportRow, "orgId" | "mailboxId" | "requestedByUserId">) {
+  const box = await db.query.mailbox.findFirst({ where: and(eq(mail.mailbox.id, row.mailboxId), eq(mail.mailbox.orgId, row.orgId), eq(mail.mailbox.isActive, true)) });
+  const access = await db.query.mailboxAccess.findFirst({ where: and(eq(mail.mailboxAccess.mailboxId, row.mailboxId), eq(mail.mailboxAccess.userId, row.requestedByUserId), eq(mail.mailboxAccess.canManage, true)) });
+  if (!box || !access) throw new ImportArchiveError("The mailbox is unavailable or import permission was removed.");
+  return box;
 }
-
-// ----------------------------------------------------------------- public ---
+const LIVE = ["uploading", "queued", "running"];
 
 export async function startImport(
   db: Db,
-  input: { orgId: string; mailboxId: string; requestedByUserId: string; filename: string; sizeBytes: number },
+  input: { orgId: string; mailboxId: string; requestedByUserId: string; filename: string; sizeBytes: number; sourceFormat?: "mbox" | "eml" },
 ): Promise<string> {
-  const [row] = await db
-    .insert(mail.mailImport)
-    .values({
-      orgId: input.orgId,
-      mailboxId: input.mailboxId,
-      requestedByUserId: input.requestedByUserId,
-      filename: input.filename.slice(0, 200),
-      sizeBytes: input.sizeBytes,
-      status: "uploading",
-    })
-    .returning({ id: mail.mailImport.id });
-  log.warn("import.started", { importId: row.id, mailboxId: input.mailboxId, bytes: input.sizeBytes });
-  return row.id;
+  expectedParts(input.sizeBytes);
+  await ownedMailbox(db, input);
+  const format = input.sourceFormat ?? (/\.eml$/i.test(input.filename) ? "eml" : "mbox");
+  if (format !== "mbox" && format !== "eml") throw new Error("Choose an MBOX or EML file.");
+  const id = crypto.randomUUID();
+  // Atomic guard avoids a unique migration rejecting duplicate legacy jobs.
+  await db.run(sql`INSERT INTO mail_import (id, org_id, mailbox_id, requested_by_user_id, filename, size_bytes, source_format, status, created_at)
+    SELECT ${id}, ${input.orgId}, ${input.mailboxId}, ${input.requestedByUserId}, ${input.filename.slice(0, 200)}, ${input.sizeBytes}, ${format}, 'uploading', ${Date.now()}
+    WHERE NOT EXISTS (SELECT 1 FROM mail_import WHERE mailbox_id = ${input.mailboxId} AND status IN ('uploading','queued','running'))`);
+  if (!await db.query.mailImport.findFirst({ where: eq(mail.mailImport.id, id) })) throw new Error("An import is already running for this mailbox.");
+  log.warn("import.started", { importId: id, mailboxId: input.mailboxId, bytes: input.sizeBytes });
+  return id;
 }
 
-/** Store one plaintext chunk as its own encrypted object. Idempotent per index. */
+/** Reserve the hash before R2: different concurrent resumes cannot overwrite. */
 export async function putImportPart(
-  db: Db,
-  env: { MAIL_RAW: R2Bucket },
-  ck: ContentKey,
-  importId: string,
-  index: number,
-  bytes: ArrayBuffer,
+  db: Db, env: { MAIL_RAW: R2Bucket }, ck: ContentKey, importId: string, index: number, bytes: ArrayBuffer,
 ): Promise<void> {
   const row = await db.query.mailImport.findFirst({ where: eq(mail.mailImport.id, importId) });
-  if (!row) throw new Error("import not found");
-  if (row.status !== "uploading") throw new Error("import is no longer accepting parts");
-  await putEncryptedBlob(env.MAIL_RAW, importPartKey(row.orgId, importId, index), ck, bytes, {
-    httpMetadata: { contentType: "application/octet-stream" },
-  });
-  // Highest index wins, so an out-of-order or retried part can't shrink the count.
-  await db
-    .update(mail.mailImport)
-    .set({ partCount: Math.max(row.partCount, index + 1) })
-    .where(eq(mail.mailImport.id, importId));
+  if (!row) throw new Error("Import not found.");
+  if (row.status !== "uploading") throw new Error("This import is no longer accepting chunks.");
+  if (bytes.byteLength !== expectedPartSize(row, index)) throw new Error("The archive chunk has an unexpected size.");
+  const sha256 = await contentHash(bytes);
+  await db.insert(mail.mailImportPart).values({ importId, index, sizeBytes: bytes.byteLength, sha256, status: "pending" }).onConflictDoNothing();
+  const manifest = await db.query.mailImportPart.findFirst({ where: and(eq(mail.mailImportPart.importId, importId), eq(mail.mailImportPart.index, index)) });
+  if (!manifest || manifest.sha256 !== sha256 || manifest.sizeBytes !== bytes.byteLength) throw new Error(DIFFERENT);
+  const key = importPartKey(row.orgId, importId, index);
+  const stored = await getDecryptedBlob(env.MAIL_RAW, key, ck);
+  if (stored) {
+    if (stored.byteLength !== bytes.byteLength || await contentHash(stored) !== sha256) throw new Error(DIFFERENT);
+  } else {
+    await putEncryptedBlob(env.MAIL_RAW, key, ck, bytes, { httpMetadata: { contentType: "application/octet-stream" } });
+  }
+  await db.update(mail.mailImportPart).set({ status: "stored" }).where(and(eq(mail.mailImportPart.importId, importId), eq(mail.mailImportPart.index, index)));
+  await db.update(mail.mailImport).set({ partCount: sql`(SELECT count(*) FROM mail_import_part WHERE import_id = ${importId} AND status = 'stored')` })
+    .where(and(eq(mail.mailImport.id, importId), eq(mail.mailImport.status, "uploading")));
 }
-
+async function validateManifest(db: Db, row: ImportRow): Promise<void> {
+  const count = expectedParts(row.sizeBytes);
+  const [parts] = await db.select({
+    count: sql<number>`count(*)`, bytes: sql<number>`coalesce(sum(size_bytes), 0)`,
+    first: sql<number>`min("index")`, last: sql<number>`max("index")`,
+    invalid: sql<number>`coalesce(sum(CASE WHEN status <> 'stored' OR length(sha256) <> 64 OR sha256 GLOB '*[^0-9a-f]*'
+      OR size_bytes <> CASE WHEN "index" = ${count - 1} THEN ${row.sizeBytes - (count - 1) * PART_PLAINTEXT_BYTES} ELSE ${PART_PLAINTEXT_BYTES} END THEN 1 ELSE 0 END), 0)`,
+  }).from(mail.mailImportPart).where(eq(mail.mailImportPart.importId, row.id));
+  if (parts.count !== count || parts.bytes !== row.sizeBytes || parts.first !== 0 || parts.last !== count - 1 || parts.invalid !== 0) throw new ImportArchiveError(INCOMPLETE);
+}
+async function enqueue(db: Db, queue: Queue<MailboxImportJob>, id: string): Promise<void> {
+  await queue.send({ kind: "mailbox_import", importId: id });
+  await db.update(mail.mailImport).set({ nextAttemptAt: new Date(Date.now() + LEASE_MS) }).where(and(eq(mail.mailImport.id, id), eq(mail.mailImport.status, "queued")));
+}
 export async function finishUpload(
-  db: Db,
-  queue: Queue<MailboxImportJob>,
-  importId: string,
+  db: Db, queue: Queue<MailboxImportJob>, importId: string,
+  deps?: { env: { MAIL_RAW: R2Bucket }; ck: ContentKey },
 ): Promise<void> {
-  await db.update(mail.mailImport).set({ status: "queued" }).where(eq(mail.mailImport.id, importId));
-  await queue.send({ kind: "mailbox_import", importId });
+  const row = await db.query.mailImport.findFirst({ where: eq(mail.mailImport.id, importId) });
+  if (!row) throw new Error("Import not found.");
+  if (row.status === "running" || row.status === "done") return;
+  if (row.status !== "uploading" && row.status !== "queued") throw new Error("This import cannot be completed.");
+  if (!deps?.env.MAIL_RAW || !deps.ck) throw new Error("Encrypted archive storage is unavailable.");
+  await ownedMailbox(db, row);
+  // Jobs verify R2 hashes too. The manifest keeps multi-GB scans out of HTTP.
+  await validateManifest(db, row);
+  await db.update(mail.mailImport).set({ status: "queued", partCount: expectedParts(row.sizeBytes), error: null, nextAttemptAt: new Date() })
+    .where(and(eq(mail.mailImport.id, row.id), inArray(mail.mailImport.status, ["uploading", "queued"])));
+  await enqueue(db, queue, row.id);
 }
-
 export async function cancelImport(db: Db, importId: string): Promise<void> {
-  await db
-    .update(mail.mailImport)
-    .set({ status: "canceled", completedAt: new Date() })
-    .where(eq(mail.mailImport.id, importId));
+  await db.update(mail.mailImport).set({ status: "canceled", completedAt: new Date(), leaseToken: null, leaseUntil: null, nextAttemptAt: null })
+    .where(and(eq(mail.mailImport.id, importId), inArray(mail.mailImport.status, [...LIVE, "failed"])));
+  // Retain staged bytes; in-flight work must never destroy data on cancellation.
+}
+export async function restartImport(db: Db, queue: Queue<MailboxImportJob>, importId: string): Promise<void> {
+  const row = await db.query.mailImport.findFirst({ where: eq(mail.mailImport.id, importId) });
+  if (!row || row.status !== "failed") throw new Error("Only a failed import can be retried.");
+  await ownedMailbox(db, row);
+  await validateManifest(db, row);
+  const updated = await db.update(mail.mailImport).set({
+    status: "queued", error: null, completedAt: null, leaseToken: null, leaseUntil: null, attempts: 0, nextAttemptAt: new Date(),
+  }).where(and(eq(mail.mailImport.id, importId), eq(mail.mailImport.status, "failed"),
+    sql`NOT EXISTS (SELECT 1 FROM mail_import AS other WHERE other.mailbox_id = ${row.mailboxId} AND other.id <> ${importId} AND other.status IN ('uploading','queued','running'))`,
+  )).returning({ id: mail.mailImport.id });
+  if (!updated.length) throw new Error("An import is already running for this mailbox.");
+  await enqueue(db, queue, importId);
 }
 
-/**
- * The dated label, reused if it already exists. Two imports into one mailbox on
- * the same day produce the same name, and `label_mailbox_name_uidx` makes
- * createLabel throw on the second — which killed the whole job before it
- * imported anything. Look first, create second.
- */
-async function ensureImportLabel(db: Db, orgId: string, mailboxId: string, at: Date): Promise<string> {
-  const name = importLabelName(at);
-  const existing = await db.query.label.findFirst({
-    where: and(eq(mail.label.mailboxId, mailboxId), eq(mail.label.name, name)),
-    columns: { id: true },
-  });
-  if (existing) return existing.id;
-  const created = await createLabel(db, { mailboxId, orgId, name });
-  return typeof created === "string" ? created : (created as { id: string }).id;
-}
-
-/** Label every imported thread carries — the undo handle. */
-function importLabelName(at: Date): string {
-  return `Imported ${at.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}`;
-}
-
-/**
- * One batch. Reads from the byte cursor, materializes whole messages, and
- * re-enqueues itself until the file is exhausted.
- */
-export async function handleImportJob(
-  db: Db,
-  env: { MAIL_RAW: R2Bucket; MAIL_QUEUE: Queue<MailboxImportJob>; MAIL_DEK: string },
-  ck: ContentKey,
-  searchKeyB64: string,
-  job: MailboxImportJob,
-): Promise<void> {
-  const row = await db.query.mailImport.findFirst({ where: eq(mail.mailImport.id, job.importId) });
-  if (!row || row.status === "canceled" || row.status === "done") return;
-
-  const box = await db.query.mailbox.findFirst({ where: eq(mail.mailbox.id, row.mailboxId) });
-  if (!box) {
-    await db
-      .update(mail.mailImport)
-      .set({ status: "failed", error: "mailbox no longer exists", completedAt: new Date() })
-      .where(eq(mail.mailImport.id, row.id));
-    return;
-  }
-
-  // Dated label, created once and reused across every batch of this import.
-  const labelId = row.labelId ?? (await ensureImportLabel(db, row.orgId, row.mailboxId, row.createdAt ?? new Date()));
-
-  await db
-    .update(mail.mailImport)
-    .set({ status: "running", labelId })
-    .where(eq(mail.mailImport.id, row.id));
-
-  const window = await readFrom(env, ck, row.orgId, row.id, row.partCount, row.cursor, MAX_BYTES_PER_RUN);
-  if (window.length === 0 && row.cursor < row.sizeBytes) {
-    // Nothing readable at the cursor but the file isn't finished: the parts are
-    // gone or unreadable. Fail loudly rather than spin.
-    await db
-      .update(mail.mailImport)
-      .set({ status: "failed", error: "The uploaded archive could not be read.", completedAt: new Date() })
-      .where(eq(mail.mailImport.id, row.id));
-    return;
-  }
-  let imported = 0;
-  let skipped = 0;
-  let failed = 0;
-  let consumed = 0;
-
-  // The window starts at a separator (or at byte 0 of the file).
-  let messageStart = isFromLine(window, 0) ? 0 : Math.max(nextSeparator(window, 0), 0);
-  const deadline = Date.now() + TIME_BUDGET_MS;
-  while (imported + skipped + failed < MAX_MESSAGES_PER_RUN) {
-    // Checkpoint rather than overrun: whatever is done so far gets its cursor
-    // written, and the next invocation picks up from there.
-    if (Date.now() > deadline) break;
-    const next = nextSeparator(window, messageStart + 1);
-    const atEndOfFile = row.cursor + window.length >= row.sizeBytes;
-    // A message with no following separator is only complete at EOF; otherwise
-    // it may straddle the window and must wait for the next run.
-    if (next === -1 && !atEndOfFile) break;
-    const end = next === -1 ? window.length : next;
-    if (end <= messageStart) break;
-
-    const raw = unescapeMboxBody(stripEnvelopeLine(window.subarray(messageStart, end)));
-    const outcome = await importOne(db, env, row.orgId, row.mailboxId, labelId, raw, { ck, searchKeyB64 });
-    if (outcome === "imported") imported++;
-    else if (outcome === "skipped") skipped++;
-    else failed++;
-
-    consumed = end;
-    messageStart = end;
-    if (next === -1) break;
-  }
-
-  const madeProgress = consumed > 0;
-  const reachedEnd = row.cursor + consumed >= row.sizeBytes;
-  // No progress AND not at the end means this run couldn't consume a single
-  // message — a stall, not a completion. Fail it rather than loop forever.
-  const stalled = !madeProgress && !reachedEnd;
-  const done = reachedEnd;
-  await db
-    .update(mail.mailImport)
-    .set({
-      cursor: row.cursor + (consumed || 0),
-      messageCount: row.messageCount + imported,
-      skippedCount: row.skippedCount + skipped,
-      failedCount: row.failedCount + failed,
-      ...(done ? { status: "done" as const, completedAt: new Date() } : {}),
-      ...(stalled
-        ? {
-            status: "failed" as const,
-            error: "Stopped: a message in this archive could not be read.",
-            completedAt: new Date(),
-          }
-        : {}),
-    })
-    .where(eq(mail.mailImport.id, row.id));
-
-  if (stalled) {
-    log.error("import.stalled", { importId: row.id, cursor: row.cursor });
-    return;
-  }
-  if (!done) {
-    await env.MAIL_QUEUE.send(job);
-    return;
-  }
-  // Success frees the staged archive; a failure keeps it so a retry doesn't
-  // mean re-uploading gigabytes.
-  for (let index = 0; index < row.partCount; index++) {
-    await env.MAIL_RAW.delete(importPartKey(row.orgId, row.id, index)).catch(() => {});
-  }
-  log.warn("import.completed", {
-    importId: row.id,
-    imported: row.messageCount + imported,
-    skipped: row.skippedCount + skipped,
-    failed: row.failedCount + failed,
-  });
-}
-
-/** Materialize one raw message. Returns what happened, for the counters. */
-async function importOne(
-  db: Db,
-  env: { MAIL_RAW: R2Bucket },
-  orgId: string,
-  mailboxId: string,
-  labelId: string,
-  raw: Uint8Array,
-  deps: { ck: ContentKey; searchKeyB64: string },
-): Promise<"imported" | "skipped" | "failed"> {
-  try {
-    const parsed = (await PostalMime.parse(raw)) as {
-      messageId?: string | null;
-      inReplyTo?: string | null;
-      references?: string | null;
-      subject?: string | null;
-      date?: string | null;
-      text?: string | null;
-      html?: string | null;
-      from?: { address?: string | null } | null;
-      headers?: { key: string; value: string }[];
-    };
-    const headerId = parsed.messageId ?? null;
-    if (!headerId) return "failed"; // no id, no dedupe — refuse rather than duplicate on re-import
-
-    const already = await db.query.message.findFirst({
-      where: and(eq(mail.message.orgId, orgId), eq(mail.message.messageIdHeader, headerId)),
-      columns: { id: true },
-    });
-
-    const header = (name: string) =>
-      parsed.headers?.find((h) => h.key.toLowerCase() === name)?.value ?? null;
-
-    const pm: ParsedMessage = {
-      messageIdHeader: headerId,
-      inReplyTo: parsed.inReplyTo ?? null,
-      references: parsed.references ?? null,
-      from: parsed.from?.address ?? "",
-      subject: parsed.subject ?? "",
-      sentAt: parsed.date ? Date.parse(parsed.date) || Date.now() : Date.now(),
-      text: parsed.text ?? null,
-      html: parsed.html ?? null,
-      // The raw is canonical: bodies and attachments are derived from it on
-      // render, so an imported message needs its own durable copy exactly like
-      // one that arrived off the wire. The staged archive parts are transient
-      // and get deleted when the import finishes.
-      r2RawKey: `raw/${orgId}/${safeKey(headerId)}`,
-      attachments: [],
-    };
-    if (!already) {
-      await putEncryptedBlob(env.MAIL_RAW, pm.r2RawKey!, deps.ck, raw, {
-        httpMetadata: { contentType: "application/octet-stream" },
-      });
+/** Rescue lost enqueues and crashed/expired workers, independent of queue DLQ. */
+export async function recoverImports(db: Db, queue: Queue<MailboxImportJob>): Promise<number> {
+  const now = new Date();
+  const due = await db.query.mailImport.findMany({ where: and(
+    inArray(mail.mailImport.status, ["queued", "running"]),
+    or(isNull(mail.mailImport.nextAttemptAt), lte(mail.mailImport.nextAttemptAt, now)),
+    or(isNull(mail.mailImport.leaseUntil), lte(mail.mailImport.leaseUntil, now)),
+  ), limit: 20 });
+  let count = 0;
+  for (const row of due) {
+    const tokenMatches = row.leaseToken === null ? isNull(mail.mailImport.leaseToken) : eq(mail.mailImport.leaseToken, row.leaseToken);
+    const nextMatches = row.nextAttemptAt === null ? isNull(mail.mailImport.nextAttemptAt) : eq(mail.mailImport.nextAttemptAt, row.nextAttemptAt);
+    const updated = await db.update(mail.mailImport).set(row.attempts >= MAX_ATTEMPTS ? {
+      status: "failed", error: "Import paused after repeated temporary failures. Retry to continue from the saved checkpoint.", leaseToken: null, leaseUntil: null, nextAttemptAt: null,
+    } : { status: "queued", leaseToken: null, leaseUntil: null, nextAttemptAt: new Date(Date.now() + LEASE_MS) })
+      .where(and(eq(mail.mailImport.id, row.id), eq(mail.mailImport.status, row.status), tokenMatches, nextMatches)).returning({ id: mail.mailImport.id });
+    if (!updated.length || row.attempts >= MAX_ATTEMPTS) continue;
+    try { await queue.send({ kind: "mailbox_import", importId: row.id }); count++; }
+    catch {
+      await db.update(mail.mailImport).set({ nextAttemptAt: new Date(Date.now() + RETRY_MS) }).where(and(eq(mail.mailImport.id, row.id), eq(mail.mailImport.status, "queued")));
     }
-    const { messageId, threadId } = await materializeMessage(db, orgId, pm, deps);
-    await materializeDelivery(db, {
-      orgId,
-      messageId,
-      threadId,
-      mailboxId,
-      role: "to",
-      viaAliasId: null,
-      subaddressTag: null,
-      sentAt: pm.sentAt,
-      // Archived by default: dumping a decade of Gmail into the inbox destroys
-      // the mailbox someone was trying to move into. A Doota→Doota round trip
-      // restores the original placement from the header we wrote on export.
-      placement: {
-        newThread: (header("x-doota-placement") ?? "archived").toLowerCase(),
-        unarchiveOnReply: false,
-      },
-      isRead: true,
-    });
-    await applyLabel(db, { threadId, mailboxId, labelId }).catch(() => {});
-    return already ? "skipped" : "imported";
+  }
+  return count;
+}
+async function readFrom(db: Db, env: { MAIL_RAW: R2Bucket }, ck: ContentKey, row: ImportRow, start: number, want: number): Promise<Uint8Array> {
+  const length = Math.min(want, row.sizeBytes - start);
+  if (length <= 0) return new Uint8Array();
+  const out = new Uint8Array(length);
+  const first = Math.floor(start / PART_PLAINTEXT_BYTES);
+  const last = Math.floor((start + length - 1) / PART_PLAINTEXT_BYTES);
+  let written = 0;
+  for (let index = first; index <= last; index++) {
+    const manifest = await db.query.mailImportPart.findFirst({ where: and(eq(mail.mailImportPart.importId, row.id), eq(mail.mailImportPart.index, index)) });
+    const bytes = await getDecryptedBlob(env.MAIL_RAW, importPartKey(row.orgId, row.id, index), ck);
+    if (!manifest || manifest.status !== "stored" || !bytes || bytes.byteLength !== manifest.sizeBytes || await contentHash(bytes) !== manifest.sha256) {
+      throw new ImportArchiveError("An uploaded archive chunk is missing or damaged. The checkpoint and remaining archive were retained. Cancel this import and upload the original file again.");
+    }
+    const from = Math.max(0, start - index * PART_PLAINTEXT_BYTES);
+    const take = Math.min(bytes.byteLength - from, out.length - written);
+    out.set(bytes.subarray(from, from + take), written);
+    written += take;
+  }
+  if (written !== out.length) throw new ImportArchiveError(INCOMPLETE);
+  return out;
+}
+async function ensureLabel(db: Db, orgId: string, mailboxId: string, name: string): Promise<string> {
+  const existing = await db.query.label.findFirst({ where: and(eq(mail.label.mailboxId, mailboxId), eq(mail.label.name, name)), columns: { id: true } });
+  return existing?.id ?? (await createLabel(db, { mailboxId, orgId, name })).id;
+}
+type MimeMessage = Awaited<ReturnType<typeof PostalMime.parse>>;
+function addresses(values: MimeMessage["to"]): string[] {
+  return (values ?? []).flatMap((v) => "group" in v ? addresses(v.group) : v.address ? [v.address] : []);
+}
+function header(parsed: MimeMessage, name: string): string | null {
+  return parsed.headers.find((h) => h.key.toLowerCase() === name)?.value ?? null;
+}
+/** Quoted comma-separated labels and RFC2047 names from Takeout headers. */
+function labelNames(value: string): string[] {
+  const names: string[] = [];
+  let name = "";
+  let quoted = false;
+  let escaped = false;
+  for (const char of value) {
+    if (escaped) { name += char; escaped = false; }
+    else if (char === "\\" && quoted) escaped = true;
+    else if (char === '"') quoted = !quoted;
+    else if (char === "," && !quoted) { names.push(decodeWords(name.trim())); name = ""; }
+    else name += char;
+  }
+  names.push(decodeWords(name.trim()));
+  return names.filter(Boolean);
+}
+const SYSTEM_LABELS = new Set(["inbox", "sent", "sent mail", "trash", "bin", "spam", "junk", "unread", "read", "starred", "all mail"]);
+function sourceState(parsed: MimeMessage, address: string) {
+  const labels = labelNames(header(parsed, "x-gmail-labels") ?? "");
+  const lower = new Set(labels.map((s) => s.toLowerCase()));
+  const exportedPlacement = (header(parsed, "x-doota-placement") ?? "").toLowerCase();
+  return {
+    placement: lower.has("trash") || lower.has("bin") ? "trash" : lower.has("spam") || lower.has("junk") ? "spam" : lower.has("inbox") ? "inbox" :
+      ["inbox", "archived", "trash", "spam", "sent"].includes(exportedPlacement) ? exportedPlacement : "archived",
+    sent: lower.has("sent") || lower.has("sent mail") || parsed.from?.address?.toLowerCase() === address.toLowerCase(),
+    read: !lower.has("unread"),
+    starred: lower.has("starred"),
+    labels: [...new Set([...labels.filter((s) => !SYSTEM_LABELS.has(s.toLowerCase())),
+      ...labelNames(header(parsed, "x-doota-labels") ?? "")])],
+  };
+}
+async function importOne(
+  db: Db, env: { MAIL_RAW: R2Bucket }, row: ImportRow, mailbox: typeof mail.mailbox.$inferSelect,
+  labelId: string, raw: Uint8Array, offset: number, endOffset: number, deps: { ck: ContentKey; searchKeyB64: string },
+): Promise<Outcome> {
+  const before = await db.query.mailImportMessage.findFirst({ where: and(eq(mail.mailImportMessage.importId, row.id), eq(mail.mailImportMessage.offset, offset)) });
+  if (before?.endOffset !== undefined && before.endOffset !== endOffset) throw new ImportArchiveError("The archive no longer matches its saved checkpoint.");
+  if (before?.status === "done") return before.outcome as Outcome;
+  const hash = await contentHash(raw);
+  const r2RawKey = `raw/${row.orgId}/${row.mailboxId}/${hash}`;
+  let parsed: MimeMessage;
+  try { parsed = await PostalMime.parse(raw); } catch { throw new ImportArchiveError("A message could not be parsed. The archive and checkpoint were retained."); }
+  if (!parsed.headers.length) throw new ImportArchiveError("A message has no MIME headers. The archive and checkpoint were retained.");
+  const already = await db.query.message.findFirst({ where: and(eq(mail.message.orgId, row.orgId), eq(mail.message.r2RawKey, r2RawKey)), columns: { id: true } });
+  await db.insert(mail.mailImportMessage).values({ importId: row.id, offset, endOffset, outcome: already ? "skipped" : "imported", status: "pending" }).onConflictDoNothing();
+  const ledger = await db.query.mailImportMessage.findFirst({ where: and(eq(mail.mailImportMessage.importId, row.id), eq(mail.mailImportMessage.offset, offset)) });
+  if (!ledger) throw new Error("Import checkpoint unavailable.");
+  const parsedDate = parsed.date ? Date.parse(parsed.date) : NaN;
+  const pm: ParsedMessage = {
+    messageIdHeader: parsed.messageId || `<${hash}@import.invalid>`,
+    inReplyTo: parsed.inReplyTo ?? null, references: parsed.references ?? null,
+    from: parsed.from?.address ?? null, fromName: parsed.from?.name ?? null,
+    to: addresses(parsed.to), cc: addresses(parsed.cc), replyTo: addresses(parsed.replyTo)[0] ?? null,
+    subject: parsed.subject ?? "", sentAt: Number.isFinite(parsedDate) ? parsedDate : row.createdAt.getTime(),
+    text: parsed.text ?? null, html: parsed.html ?? null, r2RawKey, dedupeByRaw: true, threadMailboxId: row.mailboxId, attachments: [],
+  };
+  for (const [index, a] of parsed.attachments.entries()) {
+    if (!a.filename && !a.contentId && a.disposition !== "attachment") continue;
+    const key = `attachments/${row.orgId}/${row.mailboxId}/${hash}/${index}`;
+    const bytes = typeof a.content === "string" ? new TextEncoder().encode(a.content) : a.content;
+    await putEncryptedBlob(env.MAIL_RAW, key, deps.ck, bytes, { httpMetadata: { contentType: a.mimeType } });
+    pm.attachments.push({ partId: a.contentId ?? String(index), filename: a.filename ?? null, contentType: a.mimeType, size: bytes.byteLength, r2Key: key });
+  }
+  if (!already) await putEncryptedBlob(env.MAIL_RAW, r2RawKey, deps.ck, raw, { httpMetadata: { contentType: "application/octet-stream" } });
+  const ids = await materializeMessage(db, row.orgId, pm, deps, mailbox.searchIndexed);
+  const state = sourceState(parsed, mailbox.address);
+  const role = state.sent ? "from" : pm.to?.some((a) => a.toLowerCase() === mailbox.address.toLowerCase()) ? "to" : pm.cc?.some((a) => a.toLowerCase() === mailbox.address.toLowerCase()) ? "cc" : "bcc";
+  await materializeDelivery(db, {
+    orgId: row.orgId, ...ids, mailboxId: row.mailboxId, role, viaAliasId: null, subaddressTag: null, sentAt: pm.sentAt,
+    placement: { newThread: state.placement, unarchiveOnReply: false }, isRead: state.read,
+    keywords: ["$imported", ...(state.read ? ["$seen"] : []), ...(state.starred ? ["$flagged"] : [])],
+  });
+  // Gmail labels are per-message; a newly imported conversation must aggregate
+  // its placement regardless of archive order. Existing/live/user-filed threads
+  // retain their placement, and duplicate imports never resurface old history.
+  if (ledger.outcome === "imported") {
+    const priority = state.placement === "trash" ? 3 : state.placement === "spam" ? 2 : state.placement === "inbox" ? 1 : 0;
+    if (priority) await db.update(mail.threadState).set({ placement: state.placement }).where(and(
+      eq(mail.threadState.threadId, ids.threadId), eq(mail.threadState.mailboxId, row.mailboxId),
+      eq(mail.threadState.placementOrigin, "default"), isNull(mail.threadState.snoozedUntil), isNull(mail.threadState.hiddenAt),
+      sql`EXISTS (SELECT 1 FROM thread WHERE id = ${ids.threadId} AND created_at >= ${row.createdAt.getTime()})`,
+      sql`NOT EXISTS (SELECT 1 FROM delivery d JOIN message m ON m.id = d.message_id WHERE d.mailbox_id = ${row.mailboxId}
+        AND m.thread_id = ${ids.threadId} AND instr(d.keywords, '"$imported"') = 0)`,
+      sql`CASE ${mail.threadState.placement} WHEN 'trash' THEN 3 WHEN 'spam' THEN 2 WHEN 'inbox' THEN 1 ELSE 0 END < ${priority}`,
+    ));
+  }
+  if (state.starred) await db.update(mail.threadState).set({ isStarred: true }).where(and(eq(mail.threadState.threadId, ids.threadId), eq(mail.threadState.mailboxId, row.mailboxId)));
+  await applyLabel(db, { threadId: ids.threadId, mailboxId: row.mailboxId, labelId });
+  for (const name of state.labels) {
+    const id = await ensureLabel(db, row.orgId, row.mailboxId, name);
+    await applyLabel(db, { threadId: ids.threadId, mailboxId: row.mailboxId, labelId: id });
+  }
+  await db.update(mail.mailImportMessage).set({ status: "done" }).where(and(eq(mail.mailImportMessage.importId, row.id), eq(mail.mailImportMessage.offset, offset)));
+  return ledger.outcome as Outcome;
+}
+
+/** Lease, durable per-message outcome, and CAS cursor tolerate queue redelivery. */
+export async function handleImportJob(
+  db: Db, env: { MAIL_RAW: R2Bucket; MAIL_QUEUE: Queue<MailboxImportJob>; MAIL_DEK: string },
+  ck: ContentKey, searchKeyB64: string, job: MailboxImportJob,
+): Promise<void> {
+  const initial = await db.query.mailImport.findFirst({ where: eq(mail.mailImport.id, job.importId) });
+  if (!initial || !["queued", "running"].includes(initial.status)) return;
+  const now = new Date();
+  if (initial.leaseUntil && initial.leaseUntil > now) return;
+  if (initial.attempts >= MAX_ATTEMPTS) {
+    await db.update(mail.mailImport).set({ status: "failed", error: "Import paused after repeated temporary failures. Retry to continue from the saved checkpoint.", leaseToken: null, leaseUntil: null, nextAttemptAt: null })
+      .where(and(eq(mail.mailImport.id, initial.id), eq(mail.mailImport.status, initial.status)));
+    return;
+  }
+  const token = crypto.randomUUID();
+  const [row] = await db.update(mail.mailImport).set({
+    status: "running", leaseToken: token, leaseUntil: new Date(Date.now() + LEASE_MS), nextAttemptAt: new Date(Date.now() + LEASE_MS), attempts: sql`attempts + 1`,
+  }).where(and(eq(mail.mailImport.id, initial.id), eq(mail.mailImport.status, initial.status),
+    initial.leaseToken === null ? isNull(mail.mailImport.leaseToken) : eq(mail.mailImport.leaseToken, initial.leaseToken),
+    or(isNull(mail.mailImport.leaseUntil), lte(mail.mailImport.leaseUntil, now)),
+  )).returning();
+  if (!row) return;
+  const owned = and(eq(mail.mailImport.id, row.id), eq(mail.mailImport.status, "running"), eq(mail.mailImport.leaseToken, token));
+  try {
+    const box = await ownedMailbox(db, row);
+    if (row.sourceFormat !== "mbox" && row.sourceFormat !== "eml") throw new ImportArchiveError("Unsupported archive format. Choose an MBOX or EML file.");
+    if (!Number.isSafeInteger(row.cursor) || row.cursor < 0 || row.cursor > row.sizeBytes || row.partCount !== expectedParts(row.sizeBytes)) throw new ImportArchiveError(INCOMPLETE);
+    if (row.sourceFormat === "eml" && row.sizeBytes > MAX_IMPORT_MESSAGE_BYTES) throw new ImportArchiveError(OVERSIZED);
+    const labelId = row.labelId ?? await ensureLabel(db, row.orgId, row.mailboxId,
+      `Imported ${row.createdAt.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}`);
+    await db.update(mail.mailImport).set({ labelId }).where(owned);
+    let cursor = row.cursor;
+    let windowStart = cursor;
+    let cachedWindow: Uint8Array = new Uint8Array();
+    const deadline = Date.now() + TIME_BUDGET_MS;
+    for (let n = 0; n < MAX_MESSAGES_PER_RUN && cursor < row.sizeBytes && Date.now() < deadline; n++) {
+      if (!await db.query.mailImport.findFirst({ where: owned, columns: { id: true } })) return;
+      if (cursor < windowStart || cursor >= windowStart + cachedWindow.length) {
+        windowStart = cursor;
+        cachedWindow = await readFrom(db, env, ck, row, cursor, row.sourceFormat === "eml" ? MAX_IMPORT_MESSAGE_BYTES : WINDOW_BYTES);
+      }
+      let window = cachedWindow.subarray(cursor - windowStart);
+      let start = 0;
+      if (row.sourceFormat === "mbox") {
+        if (!isFromLine(window, 0)) throw new ImportArchiveError("This file is not an MBOX archive. Choose the extracted .mbox file, not its ZIP.");
+        let newline = window.indexOf(0x0a);
+        // A valid separator can lie at the end of the cached window while its
+        // envelope newline lies in the next part. Refill before rejecting it.
+        if (newline === -1 && window.length <= 4097 && cursor + window.length < row.sizeBytes) {
+          window = new Uint8Array();
+          cachedWindow = new Uint8Array();
+          windowStart = cursor;
+          cachedWindow = await readFrom(db, env, ck, row, cursor, WINDOW_BYTES);
+          window = cachedWindow;
+          newline = window.indexOf(0x0a);
+        }
+        if (newline === -1 || newline > 4096) throw new ImportArchiveError("An MBOX envelope line is invalid.");
+        start = newline + 1;
+      }
+      let next = row.sourceFormat === "eml" ? -1 : nextSeparator(window, start);
+      if (next === -1 && cursor + window.length < row.sizeBytes) {
+        window = new Uint8Array();
+        cachedWindow = new Uint8Array();
+        windowStart = cursor;
+        cachedWindow = await readFrom(db, env, ck, row, cursor, MAX_IMPORT_MESSAGE_BYTES + 4097);
+        window = cachedWindow;
+        next = nextSeparator(window, start);
+      }
+      const end = next === -1 ? window.length : next;
+      if ((next === -1 && cursor + end < row.sizeBytes) || end - start > MAX_IMPORT_MESSAGE_BYTES) throw new ImportArchiveError(OVERSIZED);
+      const raw = row.sourceFormat === "eml" ? window : unescapeMboxBody(window.subarray(start, end));
+      if (!raw.byteLength || raw.byteLength > MAX_IMPORT_MESSAGE_BYTES) throw new ImportArchiveError(OVERSIZED);
+      const endOffset = cursor + end;
+      const outcome = await importOne(db, env, row, box, labelId, raw, cursor, endOffset, { ck, searchKeyB64 });
+      const updated = await db.update(mail.mailImport).set({
+        cursor: endOffset, messageCount: outcome === "imported" ? sql`message_count + 1` : sql`message_count`,
+        skippedCount: outcome === "skipped" ? sql`skipped_count + 1` : sql`skipped_count`, error: null,
+      }).where(and(owned, eq(mail.mailImport.cursor, cursor))).returning({ id: mail.mailImport.id });
+      if (!updated.length) return;
+      cursor = endOffset;
+    }
+    const done = cursor >= row.sizeBytes;
+    const updated = await db.update(mail.mailImport).set({
+      status: done ? "done" : "queued", attempts: 0, leaseToken: null, leaseUntil: null,
+      nextAttemptAt: done ? null : new Date(), completedAt: done ? new Date() : null, error: null,
+    }).where(owned).returning({ id: mail.mailImport.id });
+    if (!updated.length) return;
+    if (!done) { await enqueue(db, env.MAIL_QUEUE, row.id); return; }
+    for (let i = 0; i < row.partCount; i++) await env.MAIL_RAW.delete(importPartKey(row.orgId, row.id, i)).catch(() => {});
+    log.warn("import.completed", { importId: row.id });
   } catch (err) {
-    log.debug("import.message_failed", { err: String(err).slice(0, 160) });
-    return "failed";
+    const permanent = err instanceof ImportArchiveError;
+    await db.update(mail.mailImport).set({
+      status: permanent ? "failed" : "queued", leaseToken: null, leaseUntil: null,
+      error: permanent ? err.message : "A temporary storage or database failure paused the import. It will retry from the saved checkpoint.",
+      nextAttemptAt: permanent ? null : new Date(Date.now() + RETRY_MS),
+    }).where(owned);
+    log.warn("import.paused", { importId: row.id, temporary: !permanent });
+    if (!permanent) throw new Error("Temporary import storage or database failure.");
   }
 }

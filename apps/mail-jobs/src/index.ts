@@ -5,6 +5,7 @@ import { handleOutboundQueue, type OutboundConsumerEnv } from "@doota/mail-core/
 import { handleMailEventsQueue } from "@doota/mail-core/events-consumer";
 import { handleWebhookQueue } from "@doota/mail-core/webhooks";
 import { runScheduledSweeps } from "@doota/mail-core/cron";
+import { recoverImports } from "@doota/mail-core/import";
 import { type OutboundEnv, type OutboundJob } from "@doota/mail-core/outbound";
 import { initLogLevel } from "@doota/mail-core/log";
 
@@ -54,5 +55,6 @@ export default {
       WEBHOOK_QUEUE: env.WEBHOOK_QUEUE,
     };
     ctx.waitUntil(runScheduledSweeps(db, outbound));
+    if (env.MAIL_QUEUE) ctx.waitUntil(recoverImports(db, env.MAIL_QUEUE));
   },
 } satisfies ExportedHandler<OutboundConsumerEnv, OutboundJob>;

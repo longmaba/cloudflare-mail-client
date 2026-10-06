@@ -177,8 +177,9 @@ small attachment, check Sent and inspect SPF, DKIM and DMARC results. Keep Googl
 or the previous provider's receiver service available for at least seven days,
 and check both inboxes during propagation. Keeping the services active does not
 provide duplicate delivery: a sender's cached MX determines which provider
-receives its message. Retain the old provider for historical messages; this
-client does not import historical mail or expose IMAP in v1.
+receives its message. Keep an independent historical archive when importing
+mail with [the Gmail import workflow](GMAIL-IMPORT.md). This client does not
+expose IMAP in v1.
 
 ### Retained Google Workspace routing
 

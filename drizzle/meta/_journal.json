@@ -414,6 +414,13 @@
       "when": 1791158400000,
       "tag": "0058_inbound_reliability",
       "breakpoints": true
+    },
+    {
+      "idx": 59,
+      "version": "6",
+      "when": 1791244800000,
+      "tag": "0059_mail_import_reliability",
+      "breakpoints": true
     }
   ]
 }

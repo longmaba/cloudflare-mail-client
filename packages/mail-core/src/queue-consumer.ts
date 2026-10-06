@@ -590,7 +590,7 @@ export async function handleQueue(batch: QueueBatch, env: MailEnv): Promise<void
         await handleImportJob(db, env as never, ck, env.MAIL_SEARCH_KEY, m.body);
         m.ack();
       } catch (e) {
-        log.error("import.retry", { importId: m.body.importId, ...errInfo(e) });
+        log.error("import.retry", { importId: m.body.importId, code: "temporary_import_failure" });
         m.retry();
       }
       continue;

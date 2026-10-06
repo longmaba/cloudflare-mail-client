@@ -539,6 +539,7 @@ export const mailImport = sqliteTable(
     // uploading (row exists before any job) | queued | running | done | failed | canceled
     status: text("status").default("uploading").notNull(),
     filename: text("filename").default("").notNull(),
+    sourceFormat: text("source_format").default("mbox").notNull(),
     /** Total upload size, so progress is an honest fraction before we know the
      * message count (which needs a full read to establish). */
     sizeBytes: integer("size_bytes").default(0).notNull(),
@@ -552,10 +553,44 @@ export const mailImport = sqliteTable(
     failedCount: integer("failed_count").default(0).notNull(),
     labelId: text("label_id"),
     error: text("error"),
+    /** At-least-once queue deliveries may claim only one active batch. */
+    leaseToken: text("lease_token"),
+    leaseUntil: integer("lease_until", { mode: "timestamp_ms" }),
+    attempts: integer("attempts").default(0).notNull(),
+    nextAttemptAt: integer("next_attempt_at", { mode: "timestamp_ms" }),
     createdAt: now(),
     completedAt: integer("completed_at", { mode: "timestamp_ms" }),
   },
-  (t) => [index("mail_import_mailbox_idx").on(t.mailboxId)],
+  (t) => [
+    index("mail_import_mailbox_idx").on(t.mailboxId),
+    index("mail_import_recovery_idx").on(t.status, t.nextAttemptAt, t.leaseUntil),
+  ],
+);
+
+/** A planned per-message outcome survives crashes before the byte checkpoint. */
+export const mailImportMessage = sqliteTable(
+  "mail_import_message",
+  {
+    importId: text("import_id").notNull().references(() => mailImport.id, { onDelete: "cascade" }),
+    offset: integer("offset").notNull(),
+    endOffset: integer("end_offset").notNull(),
+    outcome: text("outcome").notNull(), // imported | skipped | failed
+    status: text("status").default("pending").notNull(), // pending | done
+  },
+  (t) => [uniqueIndex("mail_import_message_offset_uidx").on(t.importId, t.offset)],
+);
+
+/** Immutable plaintext hashes validate resumed uploads and queue reads. */
+export const mailImportPart = sqliteTable(
+  "mail_import_part",
+  {
+    importId: text("import_id").notNull().references(() => mailImport.id, { onDelete: "cascade" }),
+    index: integer("index").notNull(),
+    sizeBytes: integer("size_bytes").notNull(),
+    sha256: text("sha256").notNull(),
+    status: text("status").default("pending").notNull(), // pending | stored
+  },
+  (t) => [uniqueIndex("mail_import_part_index_uidx").on(t.importId, t.index)],
 );
 
 /**
