@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import Cloudflare from "cloudflare";
-import { APP_CLOUDFLARE_ACCOUNT_ID, APP_CLOUDFLARE_API_TOKEN, MAIL_DOMAIN, MAIL_ROUTING_MODE } from "$app/env/private";
-import { assertMailScope } from './routing-policy.js';
+import { APP_CLOUDFLARE_ACCOUNT_ID, APP_CLOUDFLARE_API_TOKEN, MAIL_DOMAIN, MAIL_ROUTING_MODE, MAIL_STAGING_DOMAIN, MAIL_MIGRATED_DOMAIN, MAIL_ZONE_NAME } from "$app/env/private";
+import { assertMailScope, isMigratedMailScope } from './routing-policy.js';
 import type { DNSRecord } from 'cloudflare/resources/email-routing/dns';
 import type { RecordCreateParams, RecordResponse } from 'cloudflare/resources/dns/records';
 import type { SubdomainCreateResponse } from 'cloudflare/resources/email-sending/subdomains/subdomains';
@@ -601,7 +601,12 @@ export async function getRoutingConfig(
   zoneId: string,
   apex: string,
 ): Promise<RoutingConfig> {
-  if (apex !== MAIL_DOMAIN) throw new Error('This domain is outside the configured mail instance.');
+  if (apex !== MAIL_DOMAIN) {
+    const zone = await pollZoneStatus(zoneId);
+    assertMailScope(apex, zone.name, MAIL_DOMAIN ?? '', MAIL_ROUTING_MODE ?? 'manual', {
+      staged: MAIL_STAGING_DOMAIN ?? '', migrated: MAIL_MIGRATED_DOMAIN ?? '', zone: MAIL_ZONE_NAME ?? '',
+    });
+  }
   const settings = await cf().emailRouting.get({ zone_id: zoneId }).catch(() => null);
   return {
     enabled: !!settings?.enabled,
@@ -609,6 +614,49 @@ export async function getRoutingConfig(
     status: settings?.status,
     subdomains: [],
   };
+}
+
+/** Completed migration refreshes inspect readiness; cutover writes belong to the installer. */
+export async function inspectMigratedMail(zoneId: string, domain: string): Promise<void> {
+  const zone = await pollZoneStatus(zoneId);
+  if (!isMigratedMailScope(domain, zone.name, MAIL_DOMAIN ?? '', MAIL_ROUTING_MODE ?? 'manual', {
+    staged: MAIL_STAGING_DOMAIN ?? '', migrated: MAIL_MIGRATED_DOMAIN ?? '', zone: MAIL_ZONE_NAME ?? '',
+  }) || zone.status !== 'active') {
+    throw new MailSetupError('The migrated domain must match the installed active Cloudflare zone. Run doctor.');
+  }
+  const routing = await cf().emailRouting.get({ zone_id: zoneId });
+  const identities: SubdomainCreateResponse[] = [];
+  for await (const identity of cf().emailSending.subdomains.list({ zone_id: zoneId })) {
+    if (identity.name === domain) identities.push(identity);
+  }
+  if (!routing.enabled || !['ready', 'unlocked'].includes(routing.status ?? '') || identities.length !== 1 || !identities[0].enabled) {
+    throw new MailSetupError('The migrated domain is not ready for receiving and sending. Run doctor or resume the migration.');
+  }
+  if (routing.status === 'unlocked') {
+    // Unlocking preserves processing but permits DNS edits, so the status alone
+    // cannot establish receiving readiness. Inspect the exact apex without writes.
+    const preview = await cf().emailRouting.dns.get({ zone_id: zoneId });
+    if (!preview.success || !Array.isArray(preview.result) || !preview.result.length) {
+      throw new MailSetupError('The unlocked migrated MX/SPF requirements could not be verified. Run doctor.');
+    }
+    const required = preview.result.flatMap(record => {
+      const wanted = routingDnsRecord(record, zone.name, domain, zoneId);
+      return wanted ? [wanted] : [];
+    });
+    const requiredMx = required.filter(record => record.type === 'MX');
+    const current = await exactDnsRecords(zoneId, domain);
+    const mx = current.filter(record => record.type === 'MX');
+    const spf = current.filter(record => record.type === 'TXT' && isSpfCandidate(record.content));
+    const deniedRouting = spf.some(record => txtValue(record.content ?? '').split(/\s+/)
+      .some(term => /^[?~-]include:_spf\.mx\.cloudflare\.net$/i.test(term)));
+    if (!requiredMx.length || required.filter(record => record.type === 'TXT').length !== 1 ||
+        new Set(requiredMx.map(record => `${dnsContent(record.content)}:${record.priority}`)).size !== requiredMx.length ||
+        mx.length !== requiredMx.length || requiredMx.some(wanted => !mx.some(record => mailDnsMatches(record, wanted))) ||
+        current.some(record => record.type === 'CNAME' || record.type === 'NS') ||
+        spf.length !== 1 || deniedRouting || !authorizesRouting(spf[0].content ?? '')) {
+      throw new MailSetupError('The unlocked migrated MX/SPF differs from the required receiving configuration. Run doctor or resume the migration.');
+    }
+  }
 }
 
 /**

@@ -20,7 +20,7 @@ function txtValue(content) {
   return value;
 }
 
-async function inspectRecipientRouting(config, api) {
+export async function inspectRecipientRouting(config, api, { literalApex = false } = {}) {
   const rules = await listAll(api, `/zones/${config.zoneId}/email/routing/rules`);
   const recipients = new Set();
   let active = 0;
@@ -35,12 +35,16 @@ async function inspectRecipientRouting(config, api) {
     recipients.add(address);
     active++;
   }
-  if (config.routingMode === 'manual') {
+  if (config.routingMode === 'manual' && !literalApex) {
     if (!active) throw new Error(`No enabled literal recipient rules exist for @${config.mailDomain}. Complete pilot onboarding and provision a mailbox/alias targeting ${config.resourceNames.inbound}. Subdomains cannot use an apex catch-all; keep apex routing at its current provider.`);
     return { status: 'pass', detail: `${active} enabled literal recipient rule(s) route only to ${config.resourceNames.inbound}. Apex routing settings are not used as pilot readiness proof; compare these recipients with provisioned mailboxes/aliases.` };
   }
   const settings = (await api(`/zones/${config.zoneId}/email/routing`)).result;
-  if (!settings?.enabled || settings.status !== 'ready') throw new Error(`Apex Email Routing is not enabled and ready for ${config.mailDomain}. Complete the deliberate apex onboarding after migration checks; doctor did not enable routing or change MX.`);
+  if (!settings?.enabled || (settings.status !== 'ready' && !(literalApex && settings.status === 'unlocked'))) throw new Error(`Apex Email Routing is not enabled and ready for ${config.mailDomain}. Complete the deliberate apex onboarding after migration checks; doctor did not enable routing or change MX.`);
+  if (literalApex) {
+    if (!active) throw new Error(`No enabled literal recipient rules exist for migrated @${config.mailDomain}. Resume the reviewed migration to provision its exact mailbox/alias routes; doctor did not attach a catch-all or change routing.`);
+    return { status: 'pass', detail: `Migrated apex routing is ${settings.status}; ${active} enabled literal recipient rule(s) route only to ${config.resourceNames.inbound}. A catch-all is not required. DNS is checked separately. Compare these recipients with provisioned mailboxes/aliases; migration status checks the complete saved recipient set.` };
+  }
   let catchAll;
   try { catchAll = (await api(`/zones/${config.zoneId}/email/routing/rules/catch_all`)).result; } catch (error) { if (error.status !== 404) throw error; }
   if (!catchAll?.enabled || catchAll.matchers?.length !== 1 || catchAll.matchers[0].type !== 'all' || !targetsInboundWorker(catchAll, config.resourceNames.inbound)) {
@@ -49,7 +53,7 @@ async function inspectRecipientRouting(config, api) {
   return { status: 'pass', detail: `Apex routing ready; enabled catch-all and ${active} enabled literal recipient rule(s) target only ${config.resourceNames.inbound}.` };
 }
 
-async function inspectSendingDomain(config, api) {
+export async function inspectSendingDomain(config, api) {
   let domains;
   try { domains = await listAll(api, `/zones/${config.zoneId}/email/sending/subdomains`); } catch (error) {
     if (error.code === 'MISSING_RUNTIME_TOKEN') throw error;
@@ -57,10 +61,39 @@ async function inspectSendingDomain(config, api) {
     const entitlement = status === 401 || status === 403 ? ' Confirm Workers Paid entitlement for the selected account.' : '';
     throw new Error(`Could not inspect native Email Sending for ${config.mailDomain}${status ? ` (HTTP ${status})` : ''}. ${lookupGuidance(status, 'Email Sending Read/Edit')}${entitlement} No send or configuration change was attempted.`);
   }
-  const exact = domains.find((domain) => domain.name?.toLowerCase() === config.mailDomain);
+  const matches = domains.filter((domain) => domain.name?.toLowerCase() === config.mailDomain);
+  if (matches.length > 1) throw new Error(`Multiple native Email Sending identities match ${config.mailDomain}. Review the duplicate registrations before continuing; doctor did not change them.`);
+  const exact = matches[0];
   if (!exact) throw new Error(`Native Email Sending is not configured for exact domain ${config.mailDomain}. Onboard this domain in Email Service > Email Sending; an enabled apex, sibling or wildcard entry is not this instance's scoped sending identity.`);
   if (exact.enabled !== true) throw new Error(`Native Email Sending is disabled for ${config.mailDomain}. Re-enable this exact domain through deliberate Email Sending onboarding, then rerun doctor.`);
   return { status: 'pass', detail: `Cloudflare reports exact domain ${config.mailDomain} sending-enabled. This API does not report separate DNS-verification/delivery state; DNS records and a real reply/header check are still required.` };
+}
+
+export async function inspectMailDns(config, api) {
+  const records = await dnsSnapshot(api, config.zoneId);
+  const mailMx = records.filter((record) => record.type === 'MX' && record.name === config.mailDomain);
+  const txt = records.filter((record) => record.type === 'TXT' && record.name === config.mailDomain);
+  if (txt.some((record) => txtValue(record.content) === undefined && /^"?v=spf1(?:\s|["\\]|$)/i.test(String(record.content).trim()))) {
+    throw new Error('SPF TXT uses an ambiguous quoted or multipart value. Review one complete SPF policy in Cloudflare; doctor preserved the stored bytes.');
+  }
+  const spf = txt.filter((record) => /^v=spf1(?:\s|$)/i.test(txtValue(record.content) ?? ''));
+  const guidance = config.migratedMailDomain === config.mailDomain
+    ? 'Resume the reviewed migration, or inspect its rollback/draining status; doctor did not change DNS.'
+    : `Complete the scoped Email Routing onboarding; keep ${config.zoneName} at its old provider during pilot.`;
+  if (externalMx(records, config.mailDomain).length || !mailMx.length) throw new Error(`Inbound ${config.mailDomain} is not routed exclusively to Cloudflare. ${guidance}`);
+  if (spf.length !== 1) throw new Error('Mail domain must have exactly one SPF record. Merge authorizations rather than adding a second SPF record.');
+  if (config.migratedMailDomain === config.mailDomain) {
+    const terms = txtValue(spf[0].content).split(/\s+/);
+    const include = terms.findIndex(term => /^\+?include:_spf\.mx\.cloudflare\.net$/i.test(term));
+    const terminal = terms.findIndex(term => /^[+?~-]?all$/i.test(term));
+    if (include < 1 || (terminal >= 0 && include > terminal) || terms.some(term => /^[?~-]include:_spf\.mx\.cloudflare\.net$/i.test(term))) {
+      throw new Error(`Migrated apex SPF must authorize include:_spf.mx.cloudflare.net before its terminal all mechanism. ${guidance}`);
+    }
+  }
+  const sendingNames = [`cf-bounce.${config.mailDomain}`, `cf-bounce._domainkey.${config.mailDomain}`, `_dmarc.${config.mailDomain}`];
+  const absent = sendingNames.filter((name) => !records.some((record) => record.name === name));
+  if (absent.length) throw new Error(`Email Sending records missing: ${absent.join(', ')}. Onboard the sending domain in Email Service.`);
+  return { status: 'pass', detail: 'Inbound MX, one SPF, sending records present; real message/header checks still required.' };
 }
 
 export async function inspectInstance(config, secrets, token, { api, fetcher = fetch, preparingAccounts = false } = {}) {
@@ -128,6 +161,25 @@ export async function inspectInstance(config, secrets, token, { api, fetcher = f
     if (value !== config.stagedMailDomain) throw new Error('The production preparation binding is missing or differs from saved state. Rerun pnpm run setup -- --prepare-apex; existing apex receiving stays unchanged.');
     return { status: 'pass', detail: 'The exact selected preparation domain is bound; account creation and owner verification remain separate steps.' };
   });
+  const migratedScope = !!config.migratedMailDomain && config.routingMode === 'manual' &&
+    config.migratedMailDomain === config.zoneName && config.stagedMailDomain === config.zoneName &&
+    config.mailDomain.endsWith(`.${config.zoneName}`);
+  await check('Production migration binding', async () => {
+    const settings = await workerSettings(api, config.accountId, config.resourceNames.web);
+    const value = settings?.bindings?.find(binding => binding.name === 'MAIL_MIGRATED_DOMAIN' && binding.type === 'plain_text')?.text;
+    if (!config.migratedMailDomain) {
+      if (value) throw new Error('A migrated mail domain is deployed but absent from saved state. Restore the matching instance state before making mail changes.');
+      return { status: 'pass', detail: 'No completed apex migration is granted; the selected primary mail scope remains unchanged.' };
+    }
+    if (!migratedScope) throw new Error('Saved migration scope must be the exact prepared parent zone of the unchanged manual pilot. Restore the matching instance state; doctor did not inspect another domain.');
+    if (value !== config.migratedMailDomain) throw new Error('The migrated domain binding is missing or differs from saved state. Resume the reviewed migration deployment; doctor did not enable routing or change DNS.');
+    const plain = Object.fromEntries((settings?.bindings ?? []).filter(binding => binding.type === 'plain_text').map(binding => [binding.name, binding.text]));
+    if (plain.MAIL_DOMAIN !== config.mailDomain || plain.MAIL_ROUTING_MODE !== config.routingMode ||
+        plain.MAIL_STAGING_DOMAIN !== config.stagedMailDomain || plain.MAIL_ZONE_NAME !== config.zoneName || plain.MAIL_ZONE_ID !== config.zoneId) {
+      throw new Error('The migrated app bindings do not match the saved pilot, preparation and zone. Resume the reviewed migration deployment; doctor did not change them.');
+    }
+    return { status: 'pass', detail: 'The exact migrated apex and unchanged pilot/manual scope are bound to the selected zone. Routing, DNS and sending are checked separately.' };
+  });
   await check('Persistent mail storage', async () => {
     const settings = await workerSettings(api, config.accountId, config.resourceNames.web);
     const databaseId = settings?.bindings.find((binding) => binding.name === 'DB')?.id;
@@ -148,7 +200,7 @@ export async function inspectInstance(config, secrets, token, { api, fetcher = f
   });
   await check('Recipient Email Routing', () => inspectRecipientRouting(config, configurationApi));
   await check('Native sending domain', () => inspectSendingDomain(config, configurationApi));
-  if (config.routingMode === 'manual') {
+  if (config.routingMode === 'manual' && !migratedScope) {
     await check('Pilot apex MX preservation', async () => {
       const records = await dnsSnapshot(api, config.zoneId);
       const before = JSON.stringify(config.apexMx.map(({ content, priority }) => ({ content, priority })).sort((a, b) => a.content.localeCompare(b.content)));
@@ -157,27 +209,20 @@ export async function inspectInstance(config, secrets, token, { api, fetcher = f
       return { status: 'pass', detail: 'Apex MX still matches the saved provider, independently of pilot readiness.' };
     });
   }
-  await check('Inbound and sending DNS', async () => {
-    const records = await dnsSnapshot(api, config.zoneId);
-    const mailMx = records.filter((record) => record.type === 'MX' && record.name === config.mailDomain);
-    const txt = records.filter((record) => record.type === 'TXT' && record.name === config.mailDomain);
-    if (txt.some((record) => txtValue(record.content) === undefined && /^"?v=spf1(?:\s|["\\]|$)/i.test(String(record.content).trim()))) {
-      throw new Error('SPF TXT uses an ambiguous quoted or multipart value. Review one complete SPF policy in Cloudflare; doctor preserved the stored bytes.');
-    }
-    const spf = txt.filter((record) => /^v=spf1(?:\s|$)/i.test(txtValue(record.content) ?? ''));
-    if (externalMx(records, config.mailDomain).length || !mailMx.length) throw new Error(`Inbound ${config.mailDomain} is not routed exclusively to Cloudflare. Complete the scoped Email Routing onboarding; keep ${config.zoneName} at its old provider during pilot.`);
-    if (spf.length !== 1) throw new Error('Mail domain must have exactly one SPF record. Merge authorizations rather than adding a second SPF record.');
-    const sendingNames = [`cf-bounce.${config.mailDomain}`, `cf-bounce._domainkey.${config.mailDomain}`, `_dmarc.${config.mailDomain}`];
-    const absent = sendingNames.filter((name) => !records.some((record) => record.name === name));
-    if (absent.length) throw new Error(`Email Sending records missing: ${absent.join(', ')}. Onboard the sending domain in Email Service.`);
-    return { status: 'pass', detail: 'Inbound MX, one SPF, sending records present; real message/header checks still required.' };
-  });
+  await check('Inbound and sending DNS', () => inspectMailDns(config, api));
+  if (migratedScope) {
+    const migrated = { ...config, mailDomain: config.migratedMailDomain };
+    await check('Migrated apex Recipient Email Routing', () => inspectRecipientRouting(migrated, configurationApi, { literalApex: true }));
+    await check('Migrated apex Native sending domain', () => inspectSendingDomain(migrated, configurationApi));
+    await check('Migrated apex Inbound and sending DNS', () => inspectMailDns(migrated, api));
+  }
   await check('App HTTPS', async () => {
     const response = await fetcher(`${config.appOrigin}/login`, { signal: AbortSignal.timeout(20_000), redirect: 'manual' });
     if (response.status < 200 || response.status >= 400) throw new Error(`HTTP ${response.status}. Check custom domain, certificates and Worker logs.`);
     return { status: 'pass', detail: 'Login endpoint reachable. Authentication and real send/receive are separate tests.' };
   });
   checks.push({ name: 'Live mail verification', status: 'manual', detail: `Send from controlled Gmail/Outlook to a provisioned @${config.mailDomain} inbox, reply with an attachment, inspect SPF/DKIM/DMARC headers, then check queues and delivery logs. Doctor sends no messages and cannot prove delivery.` });
-  if (config.stagedMailDomain) checks.push({ name: 'Production account preparation', status: 'manual', detail: `@${config.stagedMailDomain} accounts can be prepared by the administrator using external invitations. Receiving stays at the existing apex provider; confirm every owner can sign in before a separate reviewed cutover.` });
+  if (migratedScope) checks.push({ name: 'Migrated apex live mail verification', status: 'manual', detail: `Test each @${config.migratedMailDomain} mailbox and alias from an external inbox, reply with an attachment and inspect SPF/DKIM/DMARC. Keep both receiver services available for at least seven days during propagation. After rollback, check both inboxes: retained Cloudflare routing drains delayed mail while DNS points back to the old provider. Doctor sends no mail.` });
+  else if (config.stagedMailDomain) checks.push({ name: 'Production account preparation', status: 'manual', detail: `@${config.stagedMailDomain} accounts can be prepared by the administrator using external invitations. Receiving stays at the existing apex provider; confirm every owner can sign in before a separate reviewed cutover.` });
   return checks;
 }

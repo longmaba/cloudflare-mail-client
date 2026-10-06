@@ -64,6 +64,20 @@ save drafts, but cannot send mail. The pilot remains active and existing apex
 MX/SPF records stay unchanged. Preparation is not a DNS cutover; see
 [operations](docs/OPERATIONS.md#prepare-production-accounts).
 
+After every owner reaches Inbox (administrators must enroll authenticator TOTP),
+make a matched backup, then create a fresh receiving cutover preview:
+
+```sh
+pnpm run migrate -- plan
+```
+
+The preview lists old and new MX/SPF, recipient rules and scoped native sending
+requirements. Apply and rollback use its saved filename and exact digest.
+Cutover activates the prepared organization before replacing MX; interrupted
+runs inspect current provider state and resume using the same journal. Rollback
+restores the previous MX/SPF while retaining the Cloudflare receiver and messages
+for delayed deliveries. Follow [the migration walkthrough](docs/OPERATIONS.md#migrate-the-prepared-apex).
+
 ## Credentials and activation
 
 Enable Workers Paid and Email Service sending for your account before testing

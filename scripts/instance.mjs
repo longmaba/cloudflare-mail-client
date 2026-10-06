@@ -11,6 +11,8 @@ import { assertUpgradeTarget } from './lib/upgrade.mjs';
 import { captureD1RestorePoint } from './lib/backup.mjs';
 import { presentBootstrap, saveBootstrapLink } from './lib/bootstrap.mjs';
 import { prepareApexAccounts } from './lib/apex-preparation.mjs';
+import { createMigrationPlan, readMigrationPlan, applyMigration, rollbackMigration, migrationPreview, assertOwnersReady } from './lib/apex-migration.mjs';
+import { migrationProvider, apexRecords, sameRecords, recipientRules, normalizedRule } from './lib/migration-provider.mjs';
 
 export const paidRequirement = 'Cloudflare Workers Paid is required: $5/month base, including 3,000 outbound emails each month. Additional email usage and usage above included compute/storage quotas are billed separately. Email Routing receiving alone is free; this mailbox uses paid native outbound sending.\n';
 
@@ -243,7 +245,7 @@ async function upgrade(args) {
 export async function main(args = process.argv.slice(2)) {
   const [command = 'setup', ...rest] = args.filter((argument) => argument !== '--');
   if (rest.includes('--help') || command === '--help') {
-    process.stdout.write('pnpm run setup [-- --prepare-apex] | pnpm run doctor | pnpm run upgrade -- --tag <published-tag>\nSetup deploys the app after saving private config; --prepare-apex enables production account invitations while preserving pilot/apex receiving; doctor is read-only; upgrade preserves the saved instance.\n');
+    process.stdout.write('pnpm run setup [-- --prepare-apex] | pnpm run doctor | pnpm run upgrade -- --tag <published-tag>\npnpm run migrate -- plan | status --plan <filename> | apply --plan <filename> --confirm <digest> | rollback --plan <filename> --confirm <digest>\nSetup deploys the app after saving private config; --prepare-apex enables production account invitations while preserving pilot/apex receiving; doctor and migration plan/status are read-only; upgrade preserves the saved instance.\n');
     return;
   }
   await validateTools();
@@ -251,7 +253,56 @@ export async function main(args = process.argv.slice(2)) {
   if (command === 'setup' && !rest.length) return withInstallLock(projectRoot, setup);
   if (command === 'setup' && rest.length === 1 && rest[0] === '--prepare-apex') return withInstallLock(projectRoot, () => setup({ prepareApex: true }));
   if (command === 'upgrade') return withInstallLock(projectRoot, () => upgrade(rest));
-  throw new Error('Unknown command. Use setup, doctor or upgrade --tag <published-tag>.');
+  if (command === 'migrate') return withInstallLock(projectRoot, () => migrate(rest));
+  throw new Error('Unknown command. Use setup, doctor, migrate or upgrade --tag <published-tag>.');
+}
+
+export function migrationArguments(args) {
+  const [action, ...rest] = args;
+  if (action === 'plan' && !rest.length) return { action };
+  if (action === 'status' && rest.length === 2 && rest[0] === '--plan') return { action, basename: rest[1] };
+  if (['apply', 'rollback'].includes(action) && rest.length === 4 && rest[0] === '--plan' && rest[2] === '--confirm') return { action, basename: rest[1], confirm: rest[3] };
+  throw new Error('Usage: migrate plan | status --plan <filename> | apply|rollback --plan <filename> --confirm <digest>');
+}
+
+async function migrate(args) {
+  const { action, basename, confirm } = migrationArguments(args);
+  const instance = await readInstance(projectRoot);
+  if (!instance) throw new Error('Run setup and verify a pilot before migration.');
+  const { config, secrets } = instance;
+  await verifySource(config);
+  const token = await currentToken(secrets, config.credentialSource);
+  await guardDeployment(config, secrets, token);
+  const provider = migrationProvider(config, secrets, token);
+  if (action === 'plan') {
+    const planned = await createMigrationPlan(projectRoot, config, secrets, provider);
+    process.stdout.write(`${JSON.stringify(migrationPreview(planned.basename, planned.journal), null, 2)}\nRead-only preview saved. No provider configuration or DNS records were changed.\n`);
+    return;
+  }
+  const journal = await readMigrationPlan(projectRoot, basename, config, secrets);
+  if (action === 'status') {
+    const live = await provider.snapshot();
+    let readiness = 'ready';
+    try { assertOwnersReady(live, config.zoneName); } catch (error) { readiness = error.message; }
+    let recipientsReady = false;
+    try { recipientsReady = recipientRules(live.recipients, live.rules, config.zoneName, config.resourceNames.inbound).every(wanted => live.rules.some(rule => JSON.stringify(normalizedRule(rule)) === JSON.stringify(normalizedRule(wanted)))); } catch { /* False is actionable without provider payload disclosure. */ }
+    process.stdout.write(`${JSON.stringify({ ...migrationPreview(basename, journal), current: { ownerReadiness: readiness, exactRecipientRulesReady: recipientsReady, organization: live.organization.status, oldProviderMxSpf: sameRecords(apexRecords(live.records, config.zoneName), journal.plan.previousApexDns), cloudflareMxSpf: sameRecords(apexRecords(live.records, config.zoneName), journal.plan.nextApexDns), routing: live.routingStatus, sendingEnabled: live.nativeDomain?.enabled === true, migratedScope: live.scopes.MAIL_MIGRATED_DOMAIN === config.zoneName } }, null, 2)}\n`);
+    return;
+  }
+  if (action === 'rollback') {
+    await rollbackMigration(projectRoot, basename, config, secrets, provider, confirm);
+    process.stdout.write('Previous apex MX/SPF restored. Cloudflare receiver, pilot, signing records and stored messages remain available for delayed deliveries. Keep both services active; inspect both inboxes.\n');
+    return;
+  }
+  // Migration source must be reviewable. Never deploy an uncommitted cutover.
+  if ((await git(['status', '--porcelain', '--untracked-files=no'])).trim()) throw new Error('Commit or preserve tracked source edits before applying migration. No DNS changes were made.');
+  const source = await git(['rev-parse', 'HEAD']);
+  process.stdout.write('Provisioning the reviewed plan. Receiving MX changes last. The original provider must remain active for at least seven days.\n');
+  await applyMigration(projectRoot, basename, instance, provider, confirm, {
+    deploy: value => deploy(value, token),
+    backup: databaseId => captureD1RestorePoint(projectRoot, config, secrets, token, { databaseId, tag: `apex-cutover-${basename.slice(13, -5)}`, from: source, to: source }),
+  });
+  process.stdout.write(`Apex cutover submitted for ${config.zoneName}. DNS propagation and real message tests are still required; run migrate status and doctor, then send and reply with an attachment for every recipient. Keep Google/the previous provider for historical messages. Rollback uses this same filename and digest.\n`);
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {

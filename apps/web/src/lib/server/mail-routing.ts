@@ -2,7 +2,7 @@
 import { and, eq } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import * as schema from '@doota/db/schema';
-import { MAIL_DOMAIN, MAIL_IN_WORKER_NAME, MAIL_ROUTING_MODE } from '$app/env/private';
+import { MAIL_DOMAIN, MAIL_IN_WORKER_NAME, MAIL_ROUTING_MODE, MAIL_STAGING_DOMAIN, MAIL_MIGRATED_DOMAIN, MAIL_ZONE_NAME } from '$app/env/private';
 import { cf, pollZoneStatus, MailSetupError } from './cloudflare.js';
 import { assertMailScope, assertRecipientScope } from './routing-policy.js';
 import type { EmailRoutingRule } from 'cloudflare/resources/email-routing/rules/rules';
@@ -14,7 +14,9 @@ const prefix = 'cloudflare-mail-client:';
 export async function setRecipientRouting(zoneId: string, domain: string, address: string, enabled: boolean) {
   assertRecipientScope(address, domain);
   const zone = await pollZoneStatus(zoneId);
-  assertMailScope(domain, zone.name, MAIL_DOMAIN ?? '', MAIL_ROUTING_MODE ?? 'manual');
+  assertMailScope(domain, zone.name, MAIL_DOMAIN ?? '', MAIL_ROUTING_MODE ?? 'manual', {
+    staged: MAIL_STAGING_DOMAIN ?? '', migrated: MAIL_MIGRATED_DOMAIN ?? '', zone: MAIL_ZONE_NAME ?? '',
+  });
   if (!MAIL_IN_WORKER_NAME) throw new Error('Mail worker is missing. Run setup or doctor.');
   const api = cf().emailRouting.rules;
   const name = `${prefix}${address}`;

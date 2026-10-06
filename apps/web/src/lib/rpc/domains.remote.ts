@@ -13,7 +13,8 @@ import {
   mirrorRoutingSubdomains,
   mirrorReturnPathDomain,
 } from "@doota/mail-core/mirror";
-import { MAIL_IN_WORKER_NAME, MAIL_DOMAIN, MAIL_STAGING_DOMAIN, MAIL_ROUTING_MODE } from "$app/env/private";
+import { MAIL_IN_WORKER_NAME, MAIL_DOMAIN, MAIL_STAGING_DOMAIN, MAIL_MIGRATED_DOMAIN, MAIL_ZONE_NAME, MAIL_ZONE_ID, MAIL_ROUTING_MODE } from "$app/env/private";
+import { isMigratedMailScope } from '$lib/server/routing-policy.js';
 import { syncDomainRecipients } from '$lib/server/mail-routing.js';
 import { sendRecoveryEmailVerification } from '$lib/server/recovery-email.js';
 import { senderAddress } from '@doota/db/org-domains';
@@ -23,6 +24,7 @@ import {
   getRoutingConfig,
   listZoneDnsRecords,
   inspectZoneMail,
+  inspectMigratedMail,
   listZones,
   pollZoneStatus,
   setSubaddressing,
@@ -144,6 +146,20 @@ function configuredDomain(raw: string) {
   return domain;
 }
 
+/** Public activation remains pilot-only; the installer grants completed apex maintenance. */
+function migratedOrganization(org: { domain: string; status: string; zoneId: string | null }) {
+  return org.status === 'active' && !!MAIL_ZONE_ID && org.zoneId === MAIL_ZONE_ID &&
+    isMigratedMailScope(org.domain, MAIL_ZONE_NAME ?? '', MAIL_DOMAIN ?? '', MAIL_ROUTING_MODE ?? 'manual', {
+      staged: MAIL_STAGING_DOMAIN ?? '', migrated: MAIL_MIGRATED_DOMAIN ?? '', zone: MAIL_ZONE_NAME ?? '',
+    });
+}
+
+function configuredOrganization(org: { domain: string; status: string; zoneId: string | null }) {
+  if (org.domain === MAIL_DOMAIN) return false;
+  if (!migratedOrganization(org)) error(400, 'Use an active mail domain configured by the installer.');
+  return true;
+}
+
 export const onboardDomain = command(
   z.object({ domain: z.string().min(3), sendingSubdomain: z.string().optional() }),
   async ({ domain: raw }) => {
@@ -256,7 +272,15 @@ export const refreshDomain = command(z.string(), async (orgId) => {
     if (org.zoneId !== zone.id) error(409, 'The prepared domain belongs to a different zone. Run doctor.');
     return { status: 'staged' as const, nameServers: [] };
   }
-  configuredDomain(org.domain);
+  if (configuredOrganization(org)) {
+    try {
+      await inspectMigratedMail(org.zoneId!, org.domain);
+    } catch (cause) {
+      if (cause instanceof MailSetupError) error(400, cause.message);
+      error(502, 'Could not inspect the migrated mail domain. Run doctor before retrying.');
+    }
+    return { status: 'active' as const, nameServers: [] };
+  }
   const zone = org.zoneId ? await pollZoneStatus(org.zoneId) : await findMailZone(org.domain);
   if (!zone) error(400, 'The selected zone was not found. Run doctor.');
   if (zone.status === 'active') await wireAndActivate(org.domain, zone.id);
@@ -471,10 +495,15 @@ async function orgZone(orgId: string) {
   const { locals } = getRequestEvent();
   const org = await locals.db.query.organization.findFirst({
     where: eq(schema.organization.id, orgId),
-    columns: { domain: true, zoneId: true },
+    columns: { domain: true, zoneId: true, status: true },
   });
   if (!org?.zoneId) error(400, "No Cloudflare zone for this domain yet.");
-  configuredDomain(org.domain);
+  if (configuredOrganization(org)) {
+    const zone = await pollZoneStatus(org.zoneId);
+    if (zone.id !== MAIL_ZONE_ID || zone.name !== org.domain || zone.status !== 'active') {
+      error(400, 'The migrated domain does not match the installed active Cloudflare zone. Run doctor.');
+    }
+  }
   return { zoneId: org.zoneId, apex: org.domain };
 }
 

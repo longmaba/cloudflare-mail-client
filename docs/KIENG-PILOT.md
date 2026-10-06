@@ -41,21 +41,26 @@ external recovery address. This stages the apex organization while preserving
 the pilot's primary domain, manual mode and Google MX/SPF. Confirm every owner's
 login and recovery verification before cutover; staged mailboxes cannot send.
 
-The preparation command does not perform cutover. Exact production recipient
-rules, a reviewed SPF merge, receiving DNS replacement and domain activation
-must be reconciled through a recorded resumable migration before production
-delivery starts. Do not change the saved primary domain or delete Google MX as
-a pilot repair, or mark a staged organization active to bypass readiness checks.
+The preparation command does not perform cutover. Once every owner reaches
+Inbox and administrators have enrolled authenticator TOTP, use
+`pnpm run migrate -- plan` and review its fresh protected preview. Apply its
+printed filename and digest following [the operations walkthrough](OPERATIONS.md#migrate-the-prepared-apex).
+The recorded migration provisions exact recipient rules and native sending,
+deploys the migrated scope, activates the organization, then replaces apex
+MX/SPF. Do not change the saved primary domain or delete Google MX as a pilot
+repair, or mark a staged organization active to bypass readiness checks.
 
 Keep the old receiving service available for at least seven days, check both
 inboxes during DNS propagation, and retain the old provider for historical mail.
 Publishing old and new MX simultaneously does not deliver every message to both
 providers; senders select by priority and availability.
 
-To roll back, restore the recorded previous MX priorities/content and SPF at the
-apex, disable the new apex routing rules, verify public DNS and send an external
-test to the old inbox. Keep new storage and messages intact. This DNS rollback
-does not import or move messages that already reached the new receiver.
+To roll back, use `pnpm run migrate -- rollback --plan "PLAN_BASENAME" --confirm
+"PLAN_DIGEST"` to restore recorded Google MX priorities/content/TTL and SPF.
+Keep Cloudflare's receiver, exact apex rules and stored messages available for
+senders with cached Cloudflare MX, then verify public DNS and send an external
+test to Google. This DNS rollback does not import or move messages that already
+reached the new receiver.
 
 Status: live deployment and mail acceptance must be recorded separately; this
 document does not assert that the cutover has happened.

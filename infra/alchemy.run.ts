@@ -237,6 +237,7 @@ export default Alchemy.Stack(
         ...optionalVar("MAIL_DOMAIN"),
         ...optionalVar("MAIL_ROUTING_MODE"),
         ...optionalVar("MAIL_STAGING_DOMAIN"),
+        ...optionalVar("MAIL_MIGRATED_DOMAIN"),
         ...optionalVar("MAIL_ZONE_ID"),
         ...optionalVar("MAIL_ZONE_NAME"),
         BETTER_AUTH_SECRET: betterAuthSecret,

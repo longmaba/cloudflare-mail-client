@@ -7,11 +7,15 @@ import { makeDb } from './mail-db';
 import { setRequestEvent } from './stubs/app-server';
 import { fakeCtx } from './fakes';
 
-const env = vi.hoisted(() => ({ MAIL_DOMAIN: 'pilot.example.com', MAIL_STAGING_DOMAIN: 'example.com', MAIL_ROUTING_MODE: 'manual' }));
+const env = vi.hoisted(() => ({ MAIL_DOMAIN: 'pilot.example.com', MAIL_STAGING_DOMAIN: 'example.com', MAIL_ROUTING_MODE: 'manual',
+  MAIL_MIGRATED_DOMAIN: '', MAIL_ZONE_NAME: 'example.com', MAIL_ZONE_ID: 'zone' }));
 vi.mock('$app/env/private', async (original) => ({ ...await original<object>(),
   get MAIL_DOMAIN() { return env.MAIL_DOMAIN; },
   get MAIL_STAGING_DOMAIN() { return env.MAIL_STAGING_DOMAIN; },
   get MAIL_ROUTING_MODE() { return env.MAIL_ROUTING_MODE; },
+  get MAIL_MIGRATED_DOMAIN() { return env.MAIL_MIGRATED_DOMAIN; },
+  get MAIL_ZONE_NAME() { return env.MAIL_ZONE_NAME; },
+  get MAIL_ZONE_ID() { return env.MAIL_ZONE_ID; },
 }));
 vi.mock('$app/server', async (original) => ({
   ...await original<object>(),
@@ -21,6 +25,7 @@ vi.mock('$app/server', async (original) => ({
 vi.mock('$lib/server/cloudflare.js', async (original) => ({
   ...await original<object>(),
   findMailZone: vi.fn(), pollZoneStatus: vi.fn(), wireMail: vi.fn(),
+  inspectMigratedMail: vi.fn(), getRoutingConfig: vi.fn(), setSubaddressing: vi.fn(),
   cf: vi.fn(() => { throw new Error('Provider mutation forbidden during account preparation'); }),
 }));
 vi.mock('$lib/server/mail-routing.js', () => ({ syncDomainRecipients: vi.fn() }));
@@ -29,9 +34,9 @@ vi.mock('$lib/server/auth/escape-hatches.js', async (original) => {
   return { ...actual, setOrgLifecycle: vi.fn(actual.setOrgLifecycle) };
 });
 import { setOrgLifecycle } from '$lib/server/auth/escape-hatches.js';
-import { findMailZone, pollZoneStatus, wireMail, cf } from '$lib/server/cloudflare.js';
+import { findMailZone, pollZoneStatus, wireMail, cf, inspectMigratedMail, getRoutingConfig, setSubaddressing, MailSetupError } from '$lib/server/cloudflare.js';
 import { syncDomainRecipients } from '$lib/server/mail-routing.js';
-import { stageDomain, refreshDomain, listCloudflareZones, linkDomain, onboardDomain } from '$lib/rpc/domains.remote';
+import { stageDomain, refreshDomain, listCloudflareZones, linkDomain, onboardDomain, mailRoutingConfig, toggleSubaddressing } from '$lib/rpc/domains.remote';
 
 let db: Awaited<ReturnType<typeof makeDb>>;
 let createOrganization: ReturnType<typeof vi.fn>;
@@ -48,6 +53,7 @@ async function target(status: string, zoneId = 'zone') {
 beforeEach(async () => {
   vi.clearAllMocks();
   env.MAIL_DOMAIN = 'pilot.example.com'; env.MAIL_STAGING_DOMAIN = 'example.com'; env.MAIL_ROUTING_MODE = 'manual';
+  env.MAIL_MIGRATED_DOMAIN = ''; env.MAIL_ZONE_NAME = 'example.com'; env.MAIL_ZONE_ID = 'zone';
   db = await makeDb(); invalidateDomainCache();
   await db.insert(schema.organization).values({ id: 'pilot', name: 'Pilot', slug: 'pilot', domain: 'pilot.example.com', status: 'active', zoneId: 'zone', createdAt: new Date() });
   await db.insert(schema.user).values({ id: 'owner', name: 'Owner', email: 'owner@pilot.example.com', role: 'superadmin' });
@@ -61,6 +67,9 @@ beforeEach(async () => {
     await db.insert(schema.member).values({ ...body, id: 'resumed-owner', createdAt: new Date() });
   });
   vi.mocked(findMailZone).mockResolvedValue({ id: 'zone', name: 'example.com', status: 'active', nameServers: [] });
+  vi.mocked(pollZoneStatus).mockResolvedValue({ id: 'zone', name: 'example.com', status: 'active', nameServers: [] });
+  vi.mocked(inspectMigratedMail).mockResolvedValue(undefined);
+  vi.mocked(getRoutingConfig).mockResolvedValue({ enabled: true, status: 'ready', supportSubaddress: false, subdomains: [] });
   actor();
 });
 
@@ -192,6 +201,57 @@ describe('installer-scoped production account preparation', () => {
     await expect(linkDomain('example.com')).rejects.toMatchObject({ status: 400 });
     await expect(onboardDomain({ domain: 'example.com' })).rejects.toMatchObject({ status: 400 });
     expect(wireMail).not.toHaveBeenCalled();
+  });
+
+  it('keeps staged refresh and activation read-only even with an installed migration grant', async () => {
+    await target('staged'); env.MAIL_MIGRATED_DOMAIN = 'example.com';
+    expect(await refreshDomain('target')).toEqual({ status: 'staged', nameServers: [] });
+    await expect(linkDomain('example.com')).rejects.toMatchObject({ status: 400 });
+    await expect(onboardDomain({ domain: 'example.com' })).rejects.toMatchObject({ status: 400 });
+    await expect(mailRoutingConfig('target')).rejects.toMatchObject({ status: 400 });
+    expect(inspectMigratedMail).not.toHaveBeenCalled(); expect(wireMail).not.toHaveBeenCalled();
+    expect(syncDomainRecipients).not.toHaveBeenCalled(); expect(setOrgLifecycle).not.toHaveBeenCalled();
+  });
+
+  it('refreshes only an active installed migrated apex through read-only readiness inspection', async () => {
+    await target('active'); env.MAIL_MIGRATED_DOMAIN = 'example.com';
+    expect(await refreshDomain('target')).toEqual({ status: 'active', nameServers: [] });
+    expect(inspectMigratedMail).toHaveBeenCalledWith('zone', 'example.com');
+    expect(wireMail).not.toHaveBeenCalled(); expect(syncDomainRecipients).not.toHaveBeenCalled();
+    expect(setOrgLifecycle).not.toHaveBeenCalled(); expect(cf).not.toHaveBeenCalled();
+    expect(await db.query.organization.findFirst({ where: eq(schema.organization.id, 'pilot') })).toMatchObject({ status: 'active' });
+  });
+
+  it.each(['MAIL_MIGRATED_DOMAIN', 'MAIL_STAGING_DOMAIN', 'MAIL_ZONE_NAME', 'MAIL_ZONE_ID'] as const)
+    ('rejects active migrated refresh and settings when %s does not match', async (binding) => {
+      await target('active'); env.MAIL_MIGRATED_DOMAIN = 'example.com'; env[binding] = 'foreign.test';
+      await expect(refreshDomain('target')).rejects.toMatchObject({ status: 400 });
+      await expect(mailRoutingConfig('target')).rejects.toMatchObject({ status: 400 });
+      expect(inspectMigratedMail).not.toHaveBeenCalled(); expect(wireMail).not.toHaveBeenCalled();
+      expect(getRoutingConfig).not.toHaveBeenCalled(); expect(setOrgLifecycle).not.toHaveBeenCalled();
+    });
+
+  it('reports migrated readiness failures without rewiring or silently changing lifecycle', async () => {
+    await target('active'); env.MAIL_MIGRATED_DOMAIN = 'example.com';
+    vi.mocked(inspectMigratedMail).mockRejectedValueOnce(new MailSetupError('Resume the migration.'));
+    await expect(refreshDomain('target')).rejects.toMatchObject({ status: 400 });
+    expect(await db.query.organization.findFirst({ where: eq(schema.organization.id, 'target') })).toMatchObject({ status: 'active' });
+    expect(wireMail).not.toHaveBeenCalled(); expect(setOrgLifecycle).not.toHaveBeenCalled();
+  });
+
+  it('permits migrated routing settings but keeps zone-wide plus-addressing disabled', async () => {
+    await target('active'); env.MAIL_MIGRATED_DOMAIN = 'example.com';
+    expect(await mailRoutingConfig('target')).toMatchObject({ enabled: true, status: 'ready', routingMode: 'manual', catchAllAttached: null });
+    expect(getRoutingConfig).toHaveBeenCalledWith('zone', 'example.com');
+    await expect(toggleSubaddressing({ orgId: 'target', on: true })).rejects.toMatchObject({ status: 400 });
+    expect(setSubaddressing).not.toHaveBeenCalled(); expect(wireMail).not.toHaveBeenCalled();
+  });
+
+  it('rejects migrated settings on a different live zone before provider writes', async () => {
+    await target('active'); env.MAIL_MIGRATED_DOMAIN = 'example.com';
+    vi.mocked(pollZoneStatus).mockResolvedValueOnce({ id: 'zone', name: 'foreign.test', status: 'active', nameServers: [] });
+    await expect(mailRoutingConfig('target')).rejects.toMatchObject({ status: 400 });
+    expect(getRoutingConfig).not.toHaveBeenCalled(); expect(setSubaddressing).not.toHaveBeenCalled();
   });
 
   it('offers distinct pilot activation and account preparation actions', async () => {

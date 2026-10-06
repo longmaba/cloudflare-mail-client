@@ -1,6 +1,6 @@
 # Release verification
 
-Release candidate: `v0.1.0-rc.6`. Verification date: 2026-10-06.
+Release candidate: `v0.1.0-rc.7`. Verification date: 2026-10-06.
 
 ## Automated evidence
 
@@ -10,11 +10,35 @@ On Windows with Node 24.12.0 and pnpm 10.26.2:
 | --- | --- |
 | Frozen workspace and infrastructure installs | Passed |
 | Workspace type and Svelte checks | Passed, zero errors and warnings |
-| Application tests | 87 files, 901 tests passed |
-| Portable installer tests | 79 tests passed; preparation snapshots/bindings, migration, credential replacement, live API responses and pre-upgrade restore points |
+| Application tests | 87 files, 938 tests passed |
+| Portable installer tests | 129 tests passed; migration planning/apply/rollback, snapshots/bindings, credential replacement, API adapters and pre-upgrade restore points |
 | Infrastructure TypeScript check | Passed |
 | Production Cloudflare build | Passed |
 | Local D1 migrations | All migrations through `0058` applied |
+
+The RC7 migration tests cover exact owner readiness and mandatory administrator
+TOTP, read-only fresh plans, digest confirmation, scope/identity/key checks,
+private recovery records before writes, conservative nested SPF lookup budgets,
+native DNS validation, exact recipient rules, deployment and active organization
+before MX replacement, and response-loss recovery at ten mutation boundaries.
+Rollback tests restore original MX/SPF while retaining the Cloudflare receiver,
+mail storage and keys, including recovery after an uncertain DNS batch response.
+HTTP adapter tests execute the real parameterized SQL against synthetic SQLite,
+verify separate deploy/runtime credentials, metadata-free rule writes and routing
+DNS PATCH unlock; zone-wide routing DELETE is never used.
+
+Migration maintenance is limited to the exact prepared apex in the installed
+zone. Public activation remains pilot-only; a staged refresh is read-only.
+Unlocked migrated routing is accepted only with separate DNS validation; the
+application checks the exact supplied MX and an authorized SPF policy without
+changing records. Fixtures contain no live credentials or private mail.
+
+Live migration preview was exercised read-only. It correctly refused cutover
+because two production administrators had not enrolled TOTP or completed
+onboarding. The member account had completed onboarding. Existing Google apex
+MX remained unchanged; apex sending registration and migration were not run.
+The current merged public SPF policy resolved to four nested DNS lookups during
+preflight. Actual apex send/receive and post-cutover authentication remain pending.
 
 Tests cover setup locking, domain/recovery identities, expiring single-use reset
 links, administrator security gates, current mailbox grants and assignments,

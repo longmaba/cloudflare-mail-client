@@ -3,7 +3,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const fixture = vi.hoisted(() => {
   const env = { APP_CLOUDFLARE_ACCOUNT_ID: 'account', APP_CLOUDFLARE_API_TOKEN: 'token',
-    MAIL_DOMAIN: 'pilot.example.com', MAIL_ROUTING_MODE: 'manual', MAIL_IN_WORKER_NAME: 'mail-in-pilot' };
+    MAIL_DOMAIN: 'pilot.example.com', MAIL_ROUTING_MODE: 'manual', MAIL_IN_WORKER_NAME: 'mail-in-pilot',
+    MAIL_STAGING_DOMAIN: 'example.com', MAIL_MIGRATED_DOMAIN: '', MAIL_ZONE_NAME: 'example.com' };
   const api = {
     zones: { get: vi.fn() },
     dns: { records: { list: vi.fn(), create: vi.fn(), update: vi.fn(), delete: vi.fn() } },
@@ -17,7 +18,7 @@ const fixture = vi.hoisted(() => {
 vi.mock('$app/env/private', () => fixture.env);
 vi.mock('cloudflare', () => ({ default: class { constructor() { return fixture.api; } } }));
 
-import { createRoutingRule, enablePilotEmailRouting, getRoutingConfig, onboardSendingDomain, wireMail } from '../lib/server/cloudflare.js';
+import { createRoutingRule, enableEmailRouting, enablePilotEmailRouting, getRoutingConfig, inspectMigratedMail, onboardSendingDomain, wireMail } from '../lib/server/cloudflare.js';
 import { setRecipientRouting } from '../lib/server/mail-routing.js';
 
 type Dns = { id: string; type: string; name: string; content: string; priority?: number; ttl?: number };
@@ -55,6 +56,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   fixture.env.MAIL_DOMAIN = 'pilot.example.com';
   fixture.env.MAIL_ROUTING_MODE = 'manual';
+  fixture.env.MAIL_STAGING_DOMAIN = 'example.com'; fixture.env.MAIL_MIGRATED_DOMAIN = ''; fixture.env.MAIL_ZONE_NAME = 'example.com';
   records = [...structuredClone(apex), ...sendingExpected.slice(0, 5).map((record, index) => ({ id: `sending-${index}`, ...record }))];
   fixture.api.zones.get.mockResolvedValue({ id: 'zone', name: 'example.com', status: 'active', account: { id: 'account' } });
   fixture.api.dns.records.list.mockImplementation((params) => ({
@@ -617,6 +619,134 @@ describe('recipient routing ownership', () => {
   it('rejects off-domain addresses before accessing Cloudflare', async () => {
     await expect(setRecipientRouting('zone', 'pilot.example.com', 'owner@example.com', true)).rejects.toThrow(/Recipient/);
     expect(fixture.api.get).not.toHaveBeenCalled();
+  });
+});
+
+describe('completed migration scope', () => {
+  it('maintains exact apex recipients and the pilot without enabling zone-wide routing', async () => {
+    fixture.env.MAIL_MIGRATED_DOMAIN = 'example.com';
+    await setRecipientRouting('zone', 'example.com', 'owner@example.com', true);
+    await setRecipientRouting('zone', 'pilot.example.com', 'owner@pilot.example.com', true);
+    expect(fixture.api.emailRouting.rules.create.mock.calls.map(([record]) => record.matchers[0].value)).toEqual([
+      'owner@example.com', 'owner@pilot.example.com',
+    ]);
+    expect(fixture.api.emailRouting.dns.create).not.toHaveBeenCalled();
+    expect(fixture.api.emailRouting.rules.catchAlls.update).not.toHaveBeenCalled();
+  });
+
+  it.each(['MAIL_MIGRATED_DOMAIN', 'MAIL_STAGING_DOMAIN', 'MAIL_ZONE_NAME'] as const)
+    ('rejects apex recipient maintenance when %s differs', async (binding) => {
+      fixture.env.MAIL_MIGRATED_DOMAIN = 'example.com'; fixture.env[binding] = 'foreign.test';
+      await expect(setRecipientRouting('zone', 'example.com', 'owner@example.com', true)).rejects.toThrow(/outside/);
+      expect(fixture.api.emailRouting.rules.create).not.toHaveBeenCalled();
+      expect(fixture.api.emailRouting.rules.update).not.toHaveBeenCalled();
+    });
+
+  it('keeps normal apex wiring, routing enablement and catch-all attachment unavailable after a cutover', async () => {
+    fixture.env.MAIL_MIGRATED_DOMAIN = 'example.com';
+    await expect(wireMail('zone', 'mail-in-pilot', 'example.com')).rejects.toThrow(/outside/);
+    await expect(enableEmailRouting('zone')).rejects.toThrow(/outside/);
+    await expect(createRoutingRule('zone', 'mail-in-pilot')).rejects.toThrow(/outside/);
+    expect(fixture.api.emailRouting.dns.create).not.toHaveBeenCalled();
+    expect(fixture.api.emailRouting.rules.catchAlls.update).not.toHaveBeenCalled();
+    expect(fixture.api.emailSending.subdomains.create).not.toHaveBeenCalled();
+    expect(fixture.api.dns.records.create).not.toHaveBeenCalled();
+  });
+
+  it('reads migrated settings and validates the exact apex sending identity without provider mutations', async () => {
+    fixture.env.MAIL_MIGRATED_DOMAIN = 'example.com';
+    fixture.api.emailSending.subdomains.list.mockImplementation(() => ({ async *[Symbol.asyncIterator]() {
+      yield sendingIdentity;
+      yield { ...sendingIdentity, name: 'example.com', return_path_domain: 'cf-bounce.example.com' };
+    } }));
+    expect(await getRoutingConfig('zone', 'example.com')).toMatchObject({ enabled: true, status: 'ready', subdomains: [] });
+    await inspectMigratedMail('zone', 'example.com');
+    expect(fixture.api.dns.records.create).not.toHaveBeenCalled();
+    expect(fixture.api.dns.records.update).not.toHaveBeenCalled();
+    expect(fixture.api.dns.records.delete).not.toHaveBeenCalled();
+    expect(fixture.api.emailRouting.dns.create).not.toHaveBeenCalled();
+    expect(fixture.api.emailRouting.rules.create).not.toHaveBeenCalled();
+    expect(fixture.api.emailRouting.rules.update).not.toHaveBeenCalled();
+    expect(fixture.api.emailRouting.rules.catchAlls.update).not.toHaveBeenCalled();
+    expect(fixture.api.emailSending.subdomains.create).not.toHaveBeenCalled();
+  });
+
+  it('does not accept the enabled pilot as evidence of migrated apex sending readiness', async () => {
+    fixture.env.MAIL_MIGRATED_DOMAIN = 'example.com';
+    await expect(inspectMigratedMail('zone', 'example.com')).rejects.toThrow(/not ready/);
+  });
+
+  it('accepts unlocked migrated routing only with exact receiving MX and a merged authorized SPF', async () => {
+    fixture.env.MAIL_MIGRATED_DOMAIN = 'example.com';
+    fixture.api.emailRouting.get.mockResolvedValue({ enabled: true, status: 'unlocked' });
+    fixture.api.emailSending.subdomains.list.mockImplementation(() => ({ async *[Symbol.asyncIterator]() {
+      yield { ...sendingIdentity, name: 'example.com' };
+    } }));
+    records = expected.map((record, index) => ({ id: `migrated-${index}`, ...record }));
+    records.find(record => record.type === 'TXT')!.content = '"v=spf1 include:_spf.google.com include:_spf.mx.cloudflare.net ~all"';
+    const before = structuredClone(records);
+    await inspectMigratedMail('zone', 'example.com');
+    expect(records).toEqual(before);
+    expect(fixture.api.emailRouting.dns.get).toHaveBeenCalledWith({ zone_id: 'zone' });
+    expect(fixture.api.dns.records.create).not.toHaveBeenCalled();
+    expect(fixture.api.dns.records.update).not.toHaveBeenCalled();
+    expect(fixture.api.dns.records.delete).not.toHaveBeenCalled();
+    expect(fixture.api.emailRouting.dns.create).not.toHaveBeenCalled();
+    expect(fixture.api.emailSending.subdomains.create).not.toHaveBeenCalled();
+  });
+
+  it.each(['provider MX', 'wrong priority', 'missing MX', 'duplicate MX', 'unauthorized SPF', 'duplicate SPF', 'terminal before include', 'denied include'])('rejects unlocked migrated DNS drift: %s', async (drift) => {
+    fixture.env.MAIL_MIGRATED_DOMAIN = 'example.com';
+    fixture.api.emailRouting.get.mockResolvedValue({ enabled: true, status: 'unlocked' });
+    fixture.api.emailSending.subdomains.list.mockImplementation(() => ({ async *[Symbol.asyncIterator]() {
+      yield { ...sendingIdentity, name: 'example.com' };
+    } }));
+    records = expected.map((record, index) => ({ id: `migrated-${index}`, ...record }));
+    if (drift === 'provider MX') records[0].content = 'aspmx.l.google.com';
+    if (drift === 'wrong priority') records[0].priority = 99;
+    if (drift === 'missing MX') records.shift();
+    if (drift === 'duplicate MX') records.push({ ...records[0], id: 'duplicate-mx' });
+    if (drift === 'unauthorized SPF') records.find(record => record.type === 'TXT')!.content = 'v=spf1 include:_spf.google.com ~all';
+    if (drift === 'duplicate SPF') records.push({ ...records.find(record => record.type === 'TXT')!, id: 'duplicate-spf' });
+    if (drift === 'terminal before include') records.find(record => record.type === 'TXT')!.content = 'v=spf1 -all include:_spf.mx.cloudflare.net';
+    if (drift === 'denied include') records.find(record => record.type === 'TXT')!.content = 'v=spf1 -include:_spf.mx.cloudflare.net include:_spf.mx.cloudflare.net ~all';
+    await expect(inspectMigratedMail('zone', 'example.com')).rejects.toThrow(/MX\/SPF/);
+    expect(fixture.api.dns.records.create).not.toHaveBeenCalled();
+    expect(fixture.api.dns.records.update).not.toHaveBeenCalled();
+    expect(fixture.api.dns.records.delete).not.toHaveBeenCalled();
+  });
+
+  it('keeps unlocked routing outside the configured migrated apex', async () => {
+    fixture.api.emailRouting.get.mockResolvedValue({ enabled: true, status: 'unlocked' });
+    await expect(inspectMigratedMail('zone', 'example.com')).rejects.toThrow(/installed active/);
+    expect(fixture.api.emailRouting.dns.get).not.toHaveBeenCalled();
+  });
+
+  it.each(['disabled', 'duplicate'])('rejects %s migrated sending registrations', async (state) => {
+    fixture.env.MAIL_MIGRATED_DOMAIN = 'example.com';
+    fixture.api.emailSending.subdomains.list.mockImplementation(() => ({ async *[Symbol.asyncIterator]() {
+      yield { ...sendingIdentity, name: 'example.com', enabled: state !== 'disabled' };
+      if (state === 'duplicate') yield { ...sendingIdentity, name: 'example.com' };
+    } }));
+    await expect(inspectMigratedMail('zone', 'example.com')).rejects.toThrow(/not ready/);
+  });
+
+  it('rejects unready routing even when the exact apex sending registration is enabled', async () => {
+    fixture.env.MAIL_MIGRATED_DOMAIN = 'example.com';
+    fixture.api.emailSending.subdomains.list.mockImplementation(() => ({ async *[Symbol.asyncIterator]() {
+      yield { ...sendingIdentity, name: 'example.com' };
+    } }));
+    fixture.api.emailRouting.get.mockResolvedValueOnce({ enabled: false, status: 'ready' });
+    await expect(inspectMigratedMail('zone', 'example.com')).rejects.toThrow(/not ready/);
+  });
+
+  it('rejects migrated reads outside the actual installed zone', async () => {
+    fixture.env.MAIL_MIGRATED_DOMAIN = 'example.com';
+    fixture.api.zones.get.mockResolvedValue({ id: 'zone', name: 'foreign.test', status: 'active', account: { id: 'account' } });
+    await expect(getRoutingConfig('zone', 'example.com')).rejects.toThrow(/outside/);
+    await expect(inspectMigratedMail('zone', 'example.com')).rejects.toThrow(/installed active/);
+    expect(fixture.api.emailRouting.get).not.toHaveBeenCalled();
+    expect(fixture.api.emailSending.subdomains.list).not.toHaveBeenCalled();
   });
 });
 
