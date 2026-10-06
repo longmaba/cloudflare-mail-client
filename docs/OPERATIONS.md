@@ -180,6 +180,43 @@ provide duplicate delivery: a sender's cached MX determines which provider
 receives its message. Retain the old provider for historical messages; this
 client does not import historical mail or expose IMAP in v1.
 
+### Retained Google Workspace routing
+
+Before accepting a Google migration, test replies from Gmail and retained
+Workspace accounts as well as another provider. Public MX and doctor checks do
+not inspect Google's internal delivery configuration. A retained Gmail service
+can still deliver internally or apply an old route despite the new public MX;
+a missing reply or delivery-loop bounce needs transport evidence before a fix.
+
+In **Google Admin console → Apps → Google Workspace → Gmail**, inspect enabled
+**Routing**, **Default routing**, recipient address maps, and the affected users'
+aliases and groups. Include inherited organizational-unit settings. Record the
+old settings and rollback steps privately before editing. Resolve conflicting
+rules rather than adding an overlapping rule: higher-priority settings can
+override the intended route. See [Google routing settings](https://knowledge.workspace.google.com/admin/gmail/advanced/add-gmail-routing-settings)
+and [Default routing](https://knowledge.workspace.google.com/admin/gmail/advanced/set-up-default-routing-for-your-organization).
+
+If this inspection establishes that Google must hand off migrated recipients,
+use an exact envelope-recipient filter for those addresses only, with the
+appropriate message/account scope. Under **Gmail → Hosts → Add Route**, use a
+Cloudflare receiving MX hostname from the domain's current required routing DNS,
+port **25**, and leave **Perform MX lookup on host** unchecked for that direct
+server hostname. Keep TLS, CA-signed certificate and hostname validation enabled,
+and pass **Test TLS connection** before saving. Use **Modify message → Change
+the route** to select the reviewed host route; preserve the envelope recipient.
+Do not redirect an address to itself or add it as an additional recipient.
+Do not point the route at the application hostname or back to Google.
+See [Google mail hosts](https://knowledge.workspace.google.com/admin/gmail/advanced/add-mail-servers-for-gmail-email-routing)
+and [Cloudflare receiving DNS](https://developers.cloudflare.com/email-service/configuration/domains/#routing-records).
+
+Check received-header hops, timestamps, rejecting server and DSN status codes
+privately, together with Cloudflare routing events and inbound receipt counts.
+Do not publish mail bodies, full headers, credentials or recovery links. Retest
+each migrated recipient after propagation; this procedure is not proof that an
+uninspected loop has been fixed. Keep the old service and historical mail as
+described above. Google administration remains an owner task; the installer does
+not request Google credentials or change Workspace settings.
+
 ## Roll back a migration
 
 Use the original reviewed plan and digest to restore its recorded old-provider
