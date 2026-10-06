@@ -40,11 +40,17 @@ export const load = async ({ locals }) => {
     mailboxCount = Number(mailboxRow?.n ?? 0);
   }
 
-  // Deferred super-admin email verify: only offer it to an unverified
-  // super-admin once a domain is active (there is a real sending path).
+  // Recovery uses the external address, not the hosted login address. Read
+  // current flags from D1 because the session may predate verification.
   const isSuperadmin = user.role === "superadmin";
+  const recovery = isSuperadmin ? await locals.db.query.user.findFirst({
+    where: eq(schema.user.id, user.id),
+    columns: { recoveryEmail: true, recoveryEmailVerified: true },
+  }) : null;
+  const recoveryEmail = recovery?.recoveryEmail ?? null;
+  const recoveryEmailVerified = !!recoveryEmail && !!recovery?.recoveryEmailVerified;
   let hasActiveDomain = false;
-  if (isSuperadmin && !user.emailVerified) {
+  if (isSuperadmin && !recoveryEmailVerified) {
     const active = await locals.db.query.organization.findFirst({
       where: eq(schema.organization.status, "active"),
       columns: { id: true },
@@ -55,8 +61,8 @@ export const load = async ({ locals }) => {
   return {
     orgs,
     isSuperadmin,
-    emailVerified: !!user.emailVerified,
-    email: user.email,
+    recoveryEmail,
+    recoveryEmailVerified,
     hasActiveDomain,
     userCount,
     mailboxCount,

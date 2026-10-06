@@ -1,6 +1,6 @@
 # Release verification
 
-Release candidate: `v0.1.0-rc.5`. Verification date: 2026-10-06.
+Release candidate: `v0.1.0-rc.6`. Verification date: 2026-10-06.
 
 ## Automated evidence
 
@@ -10,7 +10,7 @@ On Windows with Node 24.12.0 and pnpm 10.26.2:
 | --- | --- |
 | Frozen workspace and infrastructure installs | Passed |
 | Workspace type and Svelte checks | Passed, zero errors and warnings |
-| Application tests | 86 files, 893 tests passed |
+| Application tests | 87 files, 901 tests passed |
 | Portable installer tests | 79 tests passed; preparation snapshots/bindings, migration, credential replacement, live API responses and pre-upgrade restore points |
 | Infrastructure TypeScript check | Passed |
 | Production Cloudflare build | Passed |
@@ -21,6 +21,12 @@ links, administrator security gates, current mailbox grants and assignments,
 attachment access and reply/forward ancestry, complete-message size checks,
 durable inbound receipts, duplicate deliveries, failed enqueue and replay,
 scoped pilot DNS/rules, interrupted state and upgrade ownership/key guards.
+Dashboard recovery regressions cover unverified hosted login addresses with
+verified external recovery, conflicting cached flags, missing recovery addresses
+and unavailable sending paths. The dashboard and deferred verification command
+read current recovery state from D1. An already verified address succeeds without
+dispatching mail; a changed address receives verification at its current external
+address, and a revoked administrator role is rejected.
 Sent regression tests cover archived sender copies, replied conversations in
 Inbox, recipient isolation, spam/trash exclusion and complete browser mirrors.
 Account-switch regressions cover releasing offline database ownership while
@@ -76,6 +82,18 @@ local Wrangler D1 query confirmed that the recovery command preserves JSON
 output while disabling response logs; the focused recovery suite has five tests.
 
 ## Browser evidence
+
+RC6's recovery dashboard passed in local Chrome against the production build
+with a synthetic administrator. An unverified hosted login with verified
+external recovery displayed no verification card or button. A current D1
+unverified recovery flag overrode a stale verified session and displayed only
+the external address in the recovery warning. Verification removed that warning
+without changing hosted-login verification. An already-verified RPC succeeded
+without creating a verification token, submission or message. Original synthetic
+user, organization, security and session rows were restored; the browser closed.
+Browser errors and unexpected writes were zero. Default avatar requests were
+blocked locally; no external email was sent. This does not test a new live
+verification email or real administrator TOTP enrollment.
 
 The protected first-admin wizard was exercised locally: domain login, required
 external recovery address, password creation and first mailbox provisioning.

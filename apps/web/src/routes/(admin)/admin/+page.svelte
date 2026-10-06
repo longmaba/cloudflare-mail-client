@@ -13,6 +13,7 @@
 	import SendIcon from '@lucide/svelte/icons/send';
 	import { resolve } from '$app/paths';
 	import { errorMessage } from '$lib/utils/error-message';
+	import { invalidateAll } from '$app/navigation';
 
 	let { data } = $props();
 	const isSuperadmin = $derived(data.user.role === 'superadmin');
@@ -48,8 +49,10 @@
 		verifying = true;
 		try {
 			const res = await requestSuperadminEmailVerification();
-			if (res.success) toast.success(res.message);
-			else toast.error(res.message);
+			if (res.success) {
+				toast.success(res.message);
+				await invalidateAll();
+			} else toast.error(res.message);
 		} catch (err) {
 			toast.error(errorMessage(err, 'Could not send verification email.'));
 		} finally {
@@ -73,21 +76,26 @@
 		</p>
 	</div>
 
-	{#if data.isSuperadmin && !data.emailVerified}
+	{#if data.isSuperadmin && !data.recoveryEmailVerified}
 		<Card.Card>
 			<Card.CardHeader>
-				<Card.CardTitle class="font-heading">Verify your email</Card.CardTitle>
+				<Card.CardTitle class="font-heading">Verify your recovery email</Card.CardTitle>
 				<Card.CardDescription>
-					Your login email <span class="font-mono">{data.email}</span> is unverified. Verifying it
-					enables email-based password recovery. This is only available once a domain is active
-					(a working sending path).
+					{#if data.recoveryEmail}
+						Your external recovery email <span class="font-mono">{data.recoveryEmail}</span> is
+						unverified. Verify it to enable password recovery.
+					{:else}
+						Add an external recovery email to enable password recovery.
+					{/if}
 				</Card.CardDescription>
 			</Card.CardHeader>
 			<Card.CardContent>
-				{#if data.hasActiveDomain}
+				{#if !data.recoveryEmail}
+					<a href={resolve('/account/security')} class="text-sm underline">Add recovery email</a>
+				{:else if data.hasActiveDomain}
 					<Button onclick={verifyEmail} disabled={verifying}>
 						{#if verifying}<Spinner class="mr-1" />{/if}
-						Send verification email
+						Send recovery verification email
 					</Button>
 				{:else}
 					<p class="text-muted-foreground text-sm">

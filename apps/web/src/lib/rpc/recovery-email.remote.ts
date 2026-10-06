@@ -63,13 +63,17 @@ export const setRecoveryEmail = form(recoveryEmailSchema, async ({ recoveryEmail
  */
 export const requestSuperadminEmailVerification = command(async () => {
 	const { locals } = getRequestEvent();
-	const user = locals.user;
+	if (!locals.user) error(401, 'Not authenticated');
+	const user = await locals.db.query.user.findFirst({
+		where: eq(schema.user.id, locals.user.id),
+		columns: { id: true, email: true, role: true, recoveryEmail: true, recoveryEmailVerified: true }
+	});
 	if (!user) error(401, 'Not authenticated');
 	if (user.role !== 'superadmin') error(403, 'Super-admin only');
-	if (user.recoveryEmailVerified) {
-		return { success: false, message: 'Your recovery email is already verified.' };
-	}
 	if (!user.recoveryEmail) return { success: false, message: 'Add an external recovery email first.' };
+	if (user.recoveryEmailVerified) {
+		return { success: true, message: 'Your recovery email is already verified.' };
+	}
 
 	// Require a working sending path: at least one onboarded (active) domain.
 	const active = await locals.db.query.organization.findFirst({
