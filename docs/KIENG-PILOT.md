@@ -22,11 +22,16 @@ Further metadata checks at **09:47:46 UTC** confirmed that this Gmail reply has
 a stored message, a reply header and one non-inline attachment. The owner
 reported working client delivery; metadata checks do not prove attachment opening.
 
-The other two production accounts still need individual send/Sent/reply/attachment
-and SPF/DKIM/DMARC checks before all-account acceptance. Keep Google available
-through at least
-**2026-10-13 07:19:40 UTC** and until those checks pass, and retain historical
-mail there. See [retained Google routing](OPERATIONS.md#retained-google-workspace-routing).
+The owners now report all three production accounts passed send, Sent, reply,
+small-attachment opening and SPF/DKIM/DMARC checks. The **09:50 UTC**
+live database check still showed two sent submissions and ten completed inbound
+receipts, without matching new test send/reply records for the other two accounts.
+Server correlation for those accounts remains pending; all-account acceptance
+is not yet confirmed. Their browser checks and the new Google Admin settings
+were not independently observed. Keep Google available through at least
+**2026-10-13 07:19:40 UTC** and until correlation is resolved; retain historical
+mail there.
+See [retained Google routing](OPERATIONS.md#retained-google-workspace-routing).
 The instructions and DNS snapshot below describe the earlier pilot and migration
 procedure; the Google MX snapshot is rollback history, not current public DNS.
 
@@ -91,6 +96,5 @@ senders with cached Cloudflare MX, then verify public DNS and send an external
 test to Google. This DNS rollback does not import or move messages that already
 reached the new receiver.
 
-Deployment and mail acceptance are recorded separately in the dated current
-status above; the completed cutover does not establish every recipient's
-send/reply/attachment acceptance.
+Deployment verification, owner reports and pending server correlation are
+recorded separately in the dated current status above.
