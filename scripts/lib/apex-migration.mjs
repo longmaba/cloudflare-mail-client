@@ -10,6 +10,9 @@ const planFile = /^apex-cutover-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\.jso
 const identity = config => ({ instanceId: config.instanceId, accountId: config.accountId, zoneId: config.zoneId, zoneName: config.zoneName, mailDomain: config.mailDomain, keyFingerprint: config.keyFingerprint, resourceNames: config.resourceNames });
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const senderNames = domain => [`cf-bounce.${domain}`, `cf-bounce._domainkey.${domain}`, `_dmarc.${domain}`];
+const ownsInitialDmarc = (config, journal) => journal.plan.sending.generatedByCloudflare === true &&
+  !journal.plan.snapshot.nativeDomain && !!journal.progress.startedAt &&
+  !journal.plan.snapshot.records.some(record => dnsName(record.name) === `_dmarc.${config.zoneName}`);
 
 export function assertMigrationScope(config, secrets) {
   assertStable(config, secrets);
@@ -75,7 +78,7 @@ export async function readMigrationPlan(root, basename, config, secrets) {
   try { journal = JSON.parse(await readFile(join(root, '.local', basename), 'utf8')); } catch { throw new Error('Migration journal is missing or unreadable. Restore its original private backup. Raw contents were suppressed.'); }
   if (journal?.plan?.version !== 1 || journal.plan.kind !== 'apex-mail-cutover' || !equal(journal.plan.identity, identity(config)) || !equal(fingerprint(JSON.stringify(journal.plan)), journal.digest) || !journal.progress || typeof journal.progress !== 'object' || Array.isArray(journal.progress)) throw new Error('Migration journal integrity or instance identity differs. Restore the original private journal.');
   for (const field of ['startedAt', 'completedAt', 'rolledBackAt']) if (journal.progress[field] !== undefined && (typeof journal.progress[field] !== 'string' || !Number.isFinite(Date.parse(journal.progress[field])))) throw new Error('Migration journal integrity failed: invalid progress timestamp.');
-  for (const field of ['mxPending', 'rollbackPending']) if (journal.progress[field] !== undefined && typeof journal.progress[field] !== 'boolean') throw new Error('Migration journal integrity failed: invalid progress state.');
+  for (const field of ['mxPending', 'rollbackPending', 'dmarcPolicyReady']) if (journal.progress[field] !== undefined && typeof journal.progress[field] !== 'boolean') throw new Error('Migration journal integrity failed: invalid progress state.');
   if (journal.progress.backup !== undefined && (!journal.progress.backup || typeof journal.progress.backup !== 'object' || Array.isArray(journal.progress.backup))) throw new Error('Migration journal integrity failed: invalid backup state.');
   if (journal.progress.sending !== undefined && !Array.isArray(journal.progress.sending)) throw new Error('Migration journal integrity failed: invalid sealed sending state.');
   return journal;
@@ -103,9 +106,18 @@ export function assertMigrationDrift(config, journal, live) {
   }
   if (progress.startedAt && live.nativeDomain?.enabled) {
     const wanted = sendingRequirements(live.nativeDomain, live.nativeDns, config.zoneName);
+    const policyName = `_dmarc.${config.zoneName}`;
+    const policies = live.records.filter(record => dnsName(record.name) === policyName);
+    const rawPolicy = ownsInitialDmarc(config, journal) && !progress.dmarcPolicyReady
+      ? sendingRequirements(live.nativeDomain, live.nativeDns, config.zoneName, { monitorDmarc: false }).find(record => record.name === policyName)
+      : null;
     if (progress.sending && !sameRecords(progress.sending, wanted)) throw new Error('Native sending DNS changed during migration.');
     for (const record of live.records.filter(generated)) {
-      if (!original.records.some(row => sameMailRecord(row, record)) && !wanted.some(row => sameMailRecord(row, record))) throw new Error('Generated sending DNS drifted outside the sealed requirements.');
+      // Registration can itself create Cloudflare's default reject policy.
+      // Only this journal's new policy may briefly match that verified preview;
+      // the monitor policy must be read back before any receiving cutover.
+      const initialPolicy = rawPolicy && policies.length === 1 && sameRecords([rawPolicy], [record]);
+      if (!original.records.some(row => sameMailRecord(row, record)) && !wanted.some(row => sameMailRecord(row, record)) && !initialPolicy) throw new Error('Generated sending DNS drifted outside the sealed requirements.');
     }
     missingSendingRecords(wanted, live.records, config.zoneName);
   }
@@ -148,7 +160,22 @@ export async function applyMigration(root, basename, instance, provider, confirm
   await provider.addSendingDns(missingSendingRecords(sending, live.records, config.zoneName));
   live = await provider.snapshot();
   assertMigrationDrift(config, journal, live);
+  if (ownsInitialDmarc(config, journal)) {
+    const wantedPolicy = sending.find(record => record.name === `_dmarc.${config.zoneName}`);
+    let policies = live.records.filter(record => dnsName(record.name) === wantedPolicy.name);
+    if (policies.length !== 1) throw new Error('Initial DMARC policy is missing or duplicated; apex MX was preserved.');
+    if (!sameRecords(policies, [wantedPolicy])) {
+      if (typeof provider.ensureInitialDmarc !== 'function') throw new Error('The provider cannot normalize the initial DMARC policy; apex MX was preserved.');
+      await provider.ensureInitialDmarc(policies[0], wantedPolicy);
+      live = await provider.snapshot();
+      assertMigrationDrift(config, journal, live);
+      policies = live.records.filter(record => dnsName(record.name) === wantedPolicy.name);
+    }
+    if (!sameRecords(policies, [wantedPolicy])) throw new Error('Initial monitor DMARC readback failed; apex MX was preserved.');
+  }
   if (missingSendingRecords(sending, live.records, config.zoneName).length) throw new Error('Native sending DNS provisioning is incomplete. Rerun this journal.');
+  journal.progress.dmarcPolicyReady = true;
+  await persist();
   journal.progress.intent = 'provision exact recipient rules';
   await persist();
   const wantedRules = recipientRules(live.recipients, live.rules, config.zoneName, config.resourceNames.inbound);

@@ -95,7 +95,7 @@ export function routingRequirements(records, domain, current) {
 export function validateSender(native, domain) {
   if (!native || native.name !== domain || native.enabled !== true || !id(native.tag) || dnsName(native.return_path_domain) !== `cf-bounce.${domain}` || native.dkim_selector !== 'cf-bounce') throw new Error('Native sending identity is disabled or has unexpected scope. Review Email Sending for this exact apex.');
 }
-export function sendingRequirements(native, records, domain) {
+export function sendingRequirements(native, records, domain, { monitorDmarc = true } = {}) {
   validateSender(native, domain);
   const bounce = `cf-bounce.${domain}`, signing = `cf-bounce._domainkey.${domain}`, policy = `_dmarc.${domain}`;
   const wanted = records.map(record => {
@@ -103,7 +103,7 @@ export function sendingRequirements(native, records, domain) {
     if (!Number.isInteger(next.ttl) || (next.ttl !== 1 && (next.ttl < 60 || next.ttl > 86400))) throw new Error('Invalid sending DNS TTL.');
     if (next.type === 'MX' && next.name === bounce && cfMx(next.content) && Number.isInteger(next.priority) && next.priority >= 0 && next.priority <= 65535) return next;
     if (next.type === 'TXT' && ((next.name === bounce && /^v=spf1\s+include:_spf\.mx\.cloudflare\.net\s+[~-]all$/i.test(txt(next.content))) || (next.name === signing && /^v=DKIM1\s*;.*(?:^|;)\s*p=[A-Za-z0-9+/=\s]+;?$/i.test(dkimTxt(next.content))))) return next;
-    if (next.type === 'TXT' && next.name === policy && dmarc(next.content)) return { ...next, content: 'v=DMARC1; p=none', ttl: 1 };
+    if (next.type === 'TXT' && next.name === policy && dmarc(next.content)) return monitorDmarc ? { ...next, content: 'v=DMARC1; p=none', ttl: 1 } : next;
     throw new Error('Unexpected native sending DNS name, type or value. Apex MX was preserved.');
   });
   if (!wanted.some(record => record.type === 'MX') || [bounce, signing, policy].some(name => wanted.filter(record => record.type === 'TXT' && record.name === name).length !== 1)) throw new Error('Incomplete native sending DNS requirements.');
@@ -225,6 +225,26 @@ export function migrationProvider(config, secrets, token, { fetcher = fetch } = 
     },
     async addSendingDns(records) {
       if (records.length) await runtime(`${zone}/dns_records/batch`, 'POST', { posts: records.map(recordValue) });
+    },
+    async ensureInitialDmarc(current, wanted) {
+      const policy = `_dmarc.${config.zoneName}`;
+      if (!current || !id(current.id) || current.type !== 'TXT' || dnsName(current.name) !== policy || !dmarc(current.content) ||
+          !wanted || wanted.type !== 'TXT' || dnsName(wanted.name) !== policy || txt(wanted.content) !== 'v=DMARC1; p=none' || wanted.ttl !== 1 || wanted.proxied === true) {
+        throw new Error('Initial DMARC adjustment must target one valid policy on this exact apex with monitor-only requirements. No DNS records were changed.');
+      }
+      // Re-read exact scope before PATCH: auto-created policies may already
+      // match after a lost response, while operator drift must never be replaced.
+      const rows = (await listAll(runtime, `${zone}/dns_records?name.exact=${encodeURIComponent(policy)}`))
+        .filter(record => dnsName(record.name) === policy);
+      if (rows.length !== 1 || rows[0].id !== current.id || rows[0].type !== 'TXT' || !dmarc(rows[0].content)) {
+        throw new Error('Initial DMARC DNS identity is missing, duplicated or changed. No DNS records were changed.');
+      }
+      const live = rows[0];
+      if (sameMailRecord(live, wanted) && live.ttl === wanted.ttl) return;
+      if (!sameRecords([live], [current])) throw new Error('Initial DMARC changed since the preview. Existing DNS was preserved.');
+      await runtime(`${zone}/dns_records/${current.id}`, 'PATCH', {
+        ...recordValue(live), content: wanted.content, ttl: wanted.ttl,
+      });
     },
     async reconcileRules(rules) {
       for (const rule of rules) {

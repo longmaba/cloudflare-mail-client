@@ -84,6 +84,12 @@ async function fixture(t) {
       state.records.push(...wanted.map(record => ({ ...clone(record), id: dnsId(sequence++) })));
       commit('addSendingDns');
     },
+    async ensureInitialDmarc(current, wanted) {
+      const index = state.records.findIndex(record => record.id === current.id);
+      assert.ok(index >= 0);
+      state.records[index] = { ...state.records[index], content: wanted.content, ttl: wanted.ttl };
+      commit('ensureInitialDmarc');
+    },
     async reconcileRules(wanted) {
       for (const [index, record] of wanted.entries()) {
         const existing = state.rules.findIndex(row => row.tag && row.tag === record.tag);
@@ -253,6 +259,81 @@ test('failed Time Travel backup or private backup persistence leaves routing, li
   }
 });
 
+test('provider-created reject DMARC becomes monitor before rules and MX, including a lost PATCH response', async t => {
+  for (const loseResponse of [false, true]) {
+    const f = await fixture(t), saved = await f.plan();
+    f.setHook((label, state) => {
+      if (label === 'registerSender') state.records.push(...f.nativeDns.map((record, index) => ({ ...clone(record), id: dnsId(400 + index) })));
+    });
+    if (loseResponse) {
+      f.setFault('ensureInitialDmarc');
+      await assert.rejects(f.apply(saved), /committed response lost/);
+      assert.ok(sameRecords(apexRecords(f.state.records, f.config.zoneName), saved.journal.plan.previousApexDns));
+      assert.ok(!f.commits.some(event => event.startsWith('recipient:')));
+    }
+    const result = await f.apply(saved);
+    assert.equal(result.progress.dmarcPolicyReady, true);
+    assert.equal(f.state.records.find(record => record.name === '_dmarc.example.com').content, 'v=DMARC1; p=none');
+    assert.equal(f.commits.filter(event => event === 'ensureInitialDmarc').length, 1);
+    assert.ok(f.events.indexOf('ensureInitialDmarc') < f.events.indexOf('recipient:1'));
+    assert.ok(f.events.indexOf('ensureInitialDmarc') < f.events.indexOf('replaceApexDns'));
+  }
+});
+
+test('failed monitor-readiness persistence resumes without rewriting policy or changing MX early', async t => {
+  const f = await fixture(t), saved = await f.plan();
+  f.setHook((label, state) => {
+    if (label === 'registerSender') state.records.push(...f.nativeDns.map((record, index) => ({ ...clone(record), id: dnsId(400 + index) })));
+  });
+  await assert.rejects(f.apply(saved, { writeJson: async (path, value) => {
+    if (value.progress?.dmarcPolicyReady) throw new Error('Synthetic policy readiness persistence failure');
+    return atomicJson(path, value);
+  } }), /persistence failure/);
+  assert.ok(sameRecords(apexRecords(f.state.records, f.config.zoneName), saved.journal.plan.previousApexDns));
+  assert.ok(!f.commits.some(event => event.startsWith('recipient:')));
+  assert.equal((await readMigrationPlan(f.root, saved.basename, f.config, f.secrets)).progress.dmarcPolicyReady, undefined);
+  await f.apply(saved);
+  assert.equal(f.commits.filter(event => event === 'ensureInitialDmarc').length, 1);
+});
+
+test('initial policy refuses injected, invalid, duplicate or annotated DMARC before receiving cutover', async t => {
+  for (const drift of ['unrelated', 'invalid', 'duplicate', 'annotated']) {
+    const f = await fixture(t), saved = await f.plan();
+    f.setHook((label, state) => {
+      if (label !== 'registerSender') return;
+      const policy = { ...clone(f.nativeDns.find(record => record.name === '_dmarc.example.com')), id: dnsId(400) };
+      if (drift === 'unrelated') policy.content = 'v=DMARC1; p=quarantine';
+      if (drift === 'invalid') policy.content = 'v=DMARC1; p=invalid';
+      if (drift === 'annotated') policy.comment = 'operator-owned policy';
+      state.records.push(policy);
+      if (drift === 'duplicate') state.records.push({ ...policy, id: dnsId(401) });
+    });
+    await assert.rejects(f.apply(saved), /Generated sending DNS drifted/);
+    assert.ok(sameRecords(apexRecords(f.state.records, f.config.zoneName), saved.journal.plan.previousApexDns));
+    assert.ok(!f.commits.includes('ensureInitialDmarc'));
+  }
+});
+
+test('preexisting reject DMARC stays unchanged and is never normalized', async t => {
+  const f = await fixture(t);
+  const original = { id: dnsId(400), type: 'TXT', name: '_dmarc.example.com', content: 'v=DMARC1; p=reject; rua=mailto:dmarc@example.com', ttl: 3600, comment: 'existing policy' };
+  f.state.records.push(clone(original));
+  const saved = await f.plan();
+  await f.apply(saved);
+  assert.deepEqual(f.state.records.find(record => record.id === original.id), original);
+  assert.ok(!f.commits.includes('ensureInitialDmarc'));
+});
+
+test('monitor policy reversion after readiness blocks MX even if it matches Cloudflare defaults', async t => {
+  const f = await fixture(t), saved = await f.plan();
+  f.setHook((label, state) => {
+    if (label === 'deploy') state.records.find(record => record.name === '_dmarc.example.com').content = 'v=DMARC1; p=reject;';
+  });
+  await assert.rejects(f.apply(saved), /Generated sending DNS drifted/);
+  assert.equal((await readMigrationPlan(f.root, saved.basename, f.config, f.secrets)).progress.dmarcPolicyReady, true);
+  assert.ok(sameRecords(apexRecords(f.state.records, f.config.zoneName), saved.journal.plan.previousApexDns));
+});
+
 test('successful apply orders backup, sender DNS, exact routes, deployed scope and activation before receiving MX', async t => {
   const f = await fixture(t), saved = await f.plan();
   const keysBefore = await readFile(join(f.root, '.local', 'secrets.json'));
@@ -345,6 +426,10 @@ test('malformed progress metadata is rejected as corrupt private journal state',
   const f = await fixture(t), saved = await f.plan();
   for (const progress of ['invalid', 1, true]) {
     await atomicJson(join(f.root, '.local', saved.basename), { ...saved.journal, progress });
+    await assert.rejects(readMigrationPlan(f.root, saved.basename, f.config, f.secrets), /integrity/);
+  }
+  for (const dmarcPolicyReady of ['true', 1, null]) {
+    await atomicJson(join(f.root, '.local', saved.basename), { ...saved.journal, progress: { dmarcPolicyReady } });
     await assert.rejects(readMigrationPlan(f.root, saved.basename, f.config, f.secrets), /integrity/);
   }
   assert.deepEqual(f.commits, []);

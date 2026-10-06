@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { migrationProvider, migrationRequest, sameRecords, checkSpfBudget, normalizedRule, recipientRules } from '../lib/migration-provider.mjs';
+import { migrationProvider, migrationRequest, sameRecords, checkSpfBudget, normalizedRule, recipientRules, sendingRequirements } from '../lib/migration-provider.mjs';
 import { newSecrets, keyFingerprint, resourceNames } from '../lib/instance.mjs';
 import { migrationArguments } from '../instance.mjs';
 
@@ -44,7 +44,7 @@ function fixture(t) {
   const fetcher = async (url, options) => {
     const path = new URL(url).pathname.replace('/client/v4', ''), method = options.method ?? 'GET';
     const body = options.body ? JSON.parse(options.body) : undefined;
-    calls.push({ path, method, body });
+    calls.push({ path, method, body, query: new URL(url).search });
     const infrastructure = path.startsWith('/accounts/');
     assert.equal(options.headers.Authorization, `Bearer ${infrastructure ? secrets.deployToken : secrets.runtimeToken}`);
     const result = value => Response.json({ success: true, result: value, result_info: { total_pages: 1 } });
@@ -70,7 +70,17 @@ function fixture(t) {
       for (const record of body.posts ?? []) records.push({ ...record, id: nextId(), settings: {}, content: record.type === 'TXT' ? `"${record.content}"` : `${record.content}.` });
       return result({});
     }
-    if (path.endsWith('/dns_records')) { assert.equal(method, 'GET'); return result(records); }
+    if (/\/dns_records\/[a-f0-9]{32}$/.test(path)) {
+      assert.equal(method, 'PATCH');
+      const record = records.find(record => record.id === path.split('/').at(-1));
+      assert.ok(record); Object.assign(record, body);
+      return result(record);
+    }
+    if (path.endsWith('/dns_records')) {
+      assert.equal(method, 'GET');
+      const exact = new URL(url).searchParams.get('name.exact');
+      return result(exact ? records.filter(record => record.name === exact) : records);
+    }
     if (path.endsWith('/email/routing/rules/catch_all')) return result({ enabled: false, matchers: [{ type: 'all' }], actions: [] });
     if (/\/email\/routing\/rules(?:\/[a-f0-9]{32})?$/.test(path)) {
       if (method === 'GET') return result(rules);
@@ -155,6 +165,89 @@ test('canonical DNS comparison includes proxy and structured-data drift but tole
   assert.ok(!sameRecords(a, [{ ...a[0], data: { port: 587, target: 'mail.example.com' } }]));
   assert.ok(!sameRecords(a, [{ ...a[0], proxied: true }]));
   assert.ok(sameRecords([{ type: 'TXT', name: 'example.com', content: 'v=spf1 ~all', ttl: 1 }], [{ type: 'TXT', name: 'example.com', content: '"v=spf1 ~all"', ttl: 1, settings: {}, proxied: false }]));
+});
+
+test('sending requirements preserve validated provider DMARC when monitor normalization is disabled', async t => {
+  const f = fixture(t);
+  const native = { name: f.config.zoneName, enabled: true, tag: 'd'.repeat(32), return_path_domain: 'cf-bounce.example.com', dkim_selector: 'cf-bounce' };
+  const policy = { ...f.sendDns.at(-1), content: '"v=DMARC1; p=reject; rua=mailto:reports@external.test"', ttl: 3600, comment: 'existing provider policy', tags: ['owner:instance'] };
+  const records = [...f.sendDns.slice(0, -1), policy];
+  const original = structuredClone(records);
+  const actual = sendingRequirements(native, records, f.config.zoneName, { monitorDmarc: false }).find(record => record.name === policy.name);
+  assert.equal(actual.content, policy.content); assert.equal(actual.ttl, policy.ttl);
+  assert.equal(actual.comment, policy.comment); assert.deepEqual(actual.tags, policy.tags);
+  const monitored = sendingRequirements(native, records, f.config.zoneName).find(record => record.name === policy.name);
+  assert.equal(monitored.content, 'v=DMARC1; p=none'); assert.equal(monitored.ttl, 1);
+  assert.deepEqual(records, original);
+  for (const monitorDmarc of [true, false]) {
+    assert.throws(() => sendingRequirements(native, [...records.slice(0, -1), { ...policy, content: 'v=DMARC1; p=unknown' }], f.config.zoneName, { monitorDmarc }), /Unexpected native/);
+    assert.throws(() => sendingRequirements(native, [...records.slice(0, -1), { ...policy, name: '_dmarc.foreign.test' }], f.config.zoneName, { monitorDmarc }), /Unexpected native/);
+  }
+});
+
+test('initial DMARC adjustment re-reads the exact live policy and PATCHes only its ID while preserving metadata', async t => {
+  const f = fixture(t);
+  const current = { id: 'e'.repeat(32), type: 'TXT', name: '_dmarc.example.com', content: '"v=DMARC1; p=reject"', ttl: 3600, proxied: false,
+    comment: 'retain metadata', tags: ['owner:instance'], settings: { custom_setting: false } };
+  const wanted = { type: 'TXT', name: current.name, content: 'v=DMARC1; p=none', ttl: 1 };
+  f.records.push(structuredClone(current));
+  assert.equal(await f.provider.ensureInitialDmarc(current, wanted), undefined);
+  assert.deepEqual(f.calls.map(call => ({ path: call.path, method: call.method })), [
+    { path: `/zones/${f.config.zoneId}/dns_records`, method: 'GET' },
+    { path: `/zones/${f.config.zoneId}/dns_records/${current.id}`, method: 'PATCH' },
+  ]);
+  assert.equal(new URLSearchParams(f.calls[0].query).get('name.exact'), current.name);
+  const { id: _id, ...preserved } = current;
+  assert.deepEqual(f.calls[1].body, { ...preserved, content: wanted.content, ttl: wanted.ttl });
+  assert.deepEqual(f.records.at(-1), { ...current, content: wanted.content, ttl: wanted.ttl });
+});
+
+test('an already-matching initial monitor policy makes retry read-only despite stale supplied values', async t => {
+  const f = fixture(t);
+  const current = { id: 'e'.repeat(32), type: 'TXT', name: '_dmarc.example.com', content: 'v=DMARC1; p=reject', ttl: 3600 };
+  const wanted = { type: 'TXT', name: current.name, content: 'v=DMARC1; p=none', ttl: 1 };
+  f.records.push({ ...current, content: '"v=DMARC1; p=none"', ttl: 1, comment: 'preserve live metadata' });
+  const before = structuredClone(f.records);
+  assert.equal(await f.provider.ensureInitialDmarc(current, wanted), undefined);
+  assert.ok(f.calls.every(call => call.method === 'GET'));
+  assert.deepEqual(f.records, before);
+});
+
+test('initial DMARC rejects malformed current or desired scope and policy before API access', async t => {
+  const f = fixture(t);
+  const current = { id: 'e'.repeat(32), type: 'TXT', name: '_dmarc.example.com', content: 'v=DMARC1; p=reject', ttl: 3600 };
+  const wanted = { type: 'TXT', name: current.name, content: 'v=DMARC1; p=none', ttl: 1 };
+  for (const change of [{ id: 'invalid' }, { name: '_dmarc.foreign.test' }, { type: 'CNAME' }, { content: 'v=DMARC1; p=unknown' }]) {
+    await assert.rejects(f.provider.ensureInitialDmarc({ ...current, ...change }, wanted), /exact apex/);
+  }
+  for (const change of [{ name: '_dmarc.foreign.test' }, { type: 'CNAME' }, { content: 'v=DMARC1; p=reject' }, { ttl: 300 }, { proxied: true }]) {
+    await assert.rejects(f.provider.ensureInitialDmarc(current, { ...wanted, ...change }), /exact apex/);
+  }
+  assert.deepEqual(f.calls, []);
+});
+
+test('initial DMARC conflicts, duplicate policies and unrelated live metadata drift prevent PATCH', async t => {
+  for (const conflict of ['missing', 'duplicate', 'id', 'type', 'content', 'ttl', 'comment', 'tags', 'proxy', 'settings']) {
+    const f = fixture(t);
+    const current = { id: 'e'.repeat(32), type: 'TXT', name: '_dmarc.example.com', content: 'v=DMARC1; p=reject', ttl: 3600,
+      comment: 'original', tags: ['owner:instance'], settings: { custom_setting: false } };
+    const wanted = { type: 'TXT', name: current.name, content: 'v=DMARC1; p=none', ttl: 1 };
+    const live = structuredClone(current);
+    if (conflict !== 'missing') f.records.push(live);
+    if (conflict === 'duplicate') f.records.push({ ...live, id: 'f'.repeat(32) });
+    if (conflict === 'id') live.id = 'f'.repeat(32);
+    if (conflict === 'type') live.type = 'CNAME';
+    if (conflict === 'content') live.content = 'v=DMARC1; p=quarantine';
+    if (conflict === 'ttl') live.ttl = 300;
+    if (conflict === 'comment') live.comment = 'operator changed';
+    if (conflict === 'tags') live.tags = ['owner:operator'];
+    if (conflict === 'proxy') live.proxied = true;
+    if (conflict === 'settings') live.settings.custom_setting = true;
+    const before = structuredClone(f.records);
+    await assert.rejects(f.provider.ensureInitialDmarc(current, wanted), /DMARC.*(?:changed|identity)/);
+    assert.ok(f.calls.every(call => call.method === 'GET'));
+    assert.deepEqual(f.records, before);
+  }
 });
 
 test('migration HTTP suppresses provider and network secrets while preserving actionable scope and method', async () => {
