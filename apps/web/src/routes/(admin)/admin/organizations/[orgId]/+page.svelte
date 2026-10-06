@@ -36,6 +36,7 @@
 		pending_zone: 'pending',
 		pending_nameservers: 'pending',
 		wiring: 'pending',
+		staged: 'staged',
 		active: 'active',
 		error: 'failed'
 	};
@@ -43,6 +44,7 @@
 		pending_zone: 'Creating the Cloudflare zone…',
 		pending_nameservers: 'Waiting for nameserver delegation',
 		wiring: 'Wiring up mail routing…',
+		staged: 'Accounts prepared; mail remains at the existing provider',
 		active: 'Mail is live',
 		error: 'Setup error — check DNS'
 	};
@@ -68,7 +70,7 @@
 	// One-shot on mount, not a reactive $effect (which would retry forever if the
 	// fetch rejects, hanging the tab).
 	onMount(() => {
-		if (!org.zoneId) return;
+		if (!org.zoneId || org.status === 'staged') return;
 		mailLoading = true;
 		Promise.all([zoneAnalytics({ orgId: org.id, days: 7 }), zoneUsage(org.id)])
 			.then(([rows, usage]) => (mail = { rows, usage }))
@@ -139,7 +141,11 @@
 					<span class="text-muted-foreground font-mono text-xs">{org.domain}</span>
 				</div>
 			</div>
-			{#if !active}
+			{#if org.status === 'staged'}
+				<Button variant="outline" size="sm" class="gap-1.5" href="{base}/members">
+					Invite members <ArrowRightIcon class="size-3.5" />
+				</Button>
+			{:else if !active}
 				<Button variant="outline" size="sm" class="gap-1.5" href="{base}/domain">
 					Finish setup <ArrowRightIcon class="size-3.5" />
 				</Button>

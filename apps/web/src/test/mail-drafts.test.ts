@@ -139,10 +139,36 @@ describe("drafts — from-selector identities", () => {
     const ids = await listSendIdentities(db, "u1");
     const addrs = ids.map((identity) => identity.address).sort();
     expect(addrs).toEqual(["alice@acme.com", "secretcat@acme.com"]);
-    expect(ids.every((identity) => identity.available)).toBe(true);
+    expect(ids.every((identity) => identity.available && identity.draftAvailable)).toBe(true);
     expect(ids.find((identity) => identity.kind === "mailbox")!.subaddressable).toBe(true);
     expect(ids.find((identity) => identity.kind === "alias")!.subaddressable).toBe(false);
     expect(ids.some((identity) => identity.address === "bob@acme.com")).toBe(false);
+  });
+
+  it("allows owned staged mailbox and alias drafts without declaring them ready to send", async () => {
+    await db.update(schema.organization).set({ status: "staged" }).where(eq(schema.organization.id, ORG));
+    const ids = await listSendIdentities(db, "u1");
+    expect(ids.map((identity) => identity.address).sort()).toEqual(["alice@acme.com", "secretcat@acme.com"]);
+    expect(ids.every((identity) => identity.draftAvailable && !identity.available)).toBe(true);
+    expect(ids.every((identity) => identity.reason?.includes("Sending starts after domain migration"))).toBe(true);
+    const draft = await createDraft(db, ck, "u1", { mailboxId: "mb_alice", kind: "new", body: "prepared draft" });
+    await saveDraft(db, ck, "u1", { draftId: draft.id, clientRevision: draft.clientRevision, body: "edited before migration" });
+    expect((await getDraft(db, ck, draft.id, "u1")).body).toBe("edited before migration");
+    await expect(createDraft(db, ck, "u1", { mailboxId: "mb_bob", kind: "new", body: "foreign" })).rejects.toMatchObject({ status: 403 });
+  });
+
+  it("never grants draft eligibility to an inactive mailbox even in a staged domain", async () => {
+    await db.update(schema.organization).set({ status: "staged" }).where(eq(schema.organization.id, ORG));
+    await db.update(schema.mailbox).set({ isActive: false }).where(eq(schema.mailbox.id, "mb_alice"));
+    const ids = await listSendIdentities(db, "u1");
+    expect(ids.every((identity) => !identity.available && !identity.draftAvailable)).toBe(true);
+    expect(ids.every((identity) => identity.reason === "This mailbox is inactive.")).toBe(true);
+  });
+
+  it.each(["pending_zone", "pending_verify", "wiring", "error"])("keeps %s identities unavailable for new drafts and sending", async (status) => {
+    await db.update(schema.organization).set({ status }).where(eq(schema.organization.id, ORG));
+    const ids = await listSendIdentities(db, "u1");
+    expect(ids.every((identity) => !identity.available && !identity.draftAvailable)).toBe(true);
   });
 });
 

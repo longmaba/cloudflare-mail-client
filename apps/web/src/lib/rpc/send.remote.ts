@@ -8,7 +8,7 @@ import { can } from "@doota/db/can";
 import { sendGrantUserIds } from "@doota/mail-core/mailbox";
 import { enqueueSend, cancelSend, type OutboundEnv } from "@doota/mail-core/outbound";
 import { deliverInBackground } from "$lib/server/mail/deliver-bridge.js";
-import { resolveSender } from "@doota/mail-core/resolver";
+import { resolveSender, assertDomainNotStaged } from "@doota/mail-core/resolver";
 import { resolveSendAttachments } from "$lib/server/send-attachments.js";
 import { readableMessageReference } from "@doota/mail-core/message-access";
 
@@ -68,6 +68,7 @@ export const sendMessage = command(SendInput, async (input) => {
   }
 
   const sender = await resolveSender(locals.db, locals.user.id, input.mailboxId, input.fromAliasId);
+  await assertDomainNotStaged(locals.db, sender.orgId);
   if (input.parentMessageId) await readableMessageReference(locals.db, { userId: locals.user.id }, sender.orgId, input.parentMessageId);
   const env = outboundEnv();
   const attachments = await resolveSendAttachments(locals.db, env, locals.user.id, sender.orgId, input.attachments.map((a) => a.r2Key));

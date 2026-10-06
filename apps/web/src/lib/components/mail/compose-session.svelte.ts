@@ -134,13 +134,18 @@ export class ComposeSession {
 	// ---- derived-ish reads (methods — $derived can't live on class fields that
 	// close over `this` cleanly across surfaces, and these are cheap) ----------
 	get canSend(): boolean {
-		return this.phase === 'editing' && !!this.mailboxId && this.to.length + this.cc.length + this.bcc.length > 0;
+		return this.phase === 'editing' && !!this.selectedIdentity?.available && this.to.length + this.cc.length + this.bcc.length > 0;
+	}
+	private get selectedIdentity(): SendIdentity | undefined {
+		return this.identities.find((identity) => identity.mailboxId === this.mailboxId && (identity.aliasId ?? null) === (this.aliasId ?? null));
 	}
 	/** Why the primary action is blocked — the button's title so a disabled Send
 	 *  explains itself instead of just greying out. */
 	get sendHint(): string {
 		return !this.mailboxId
 			? 'Choose a sender first'
+			: !this.selectedIdentity?.available
+				? this.selectedIdentity?.reason ?? 'This sending identity is unavailable'
 			: this.to.length + this.cc.length + this.bcc.length === 0
 				? 'Add at least one recipient'
 				: this.scheduleAt
@@ -204,18 +209,19 @@ export class ComposeSession {
 			this.editorKey++;
 		}
 		// Default From: the mailbox in context (prefill = the current view/
-		// switcher), else the user's personal inbox, else the first available
+		// switcher), else the user's personal inbox, else the first draft-capable
 		// identity. The list is oldest→newest, so without the personal preference
 		// a shared/service mailbox could win on age.
 		const chosen =
 			(prefill?.mailboxId &&
 				this.identities.find(
 					(identity) =>
+						identity.draftAvailable &&
 						identity.mailboxId === prefill.mailboxId &&
 						(identity.aliasId ?? null) === (prefill.fromAliasId ?? null)
 				)) ||
-			this.identities.find((identity) => identity.available && identity.isPersonal) ||
-			this.identities.find((identity) => identity.available);
+			this.identities.find((identity) => identity.draftAvailable && identity.isPersonal) ||
+			this.identities.find((identity) => identity.draftAvailable);
 		if (chosen) {
 			this.mailboxId = chosen.mailboxId;
 			this.aliasId = chosen.aliasId;

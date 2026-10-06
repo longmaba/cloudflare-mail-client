@@ -7,7 +7,7 @@
 //
 //  - remote-content policy  rcp:v1:{orgId}   — read on every message render
 //    (a 20-message thread = 20 body fetches); changes via one admin toggle.
-//  - send identities        ids:v1:{userId}  — 5 D1 queries per composer open.
+//  - send identities        ids:v2:{userId}  — 5 D1 queries per composer open.
 //  - mailbox signatures     sig:v1:{userId}  — read per compose/reply open.
 //
 // Deliberately TTL-covered (no explicit invalidation): org-wide flips whose
@@ -74,7 +74,7 @@ export function cachedSendIdentities(): Promise<SendIdentity[]> {
   const { locals } = getRequestEvent();
   if (!locals.user) error(401, "Not authenticated");
   const userId = locals.user.id;
-  return kvCached(`ids:v1:${userId}`, () => listSendIdentities(locals.db, userId), Array.isArray);
+  return kvCached(`ids:v2:${userId}`, () => listSendIdentities(locals.db, userId), Array.isArray);
 }
 
 // ---- Per-user invalidation ---------------------------------------------------
@@ -82,7 +82,7 @@ export function cachedSendIdentities(): Promise<SendIdentity[]> {
 /** Drop a user's cached identities + signatures — call when their grant set,
  * their mailboxes' aliases, or their signatures change. */
 export function invalidateUserMailCache(userId: string): Promise<void> {
-  return kvDelete(`ids:v1:${userId}`, `sig:v1:${userId}`);
+  return kvDelete(`ids:v2:${userId}`, `sig:v1:${userId}`);
 }
 
 /** Alias/mailbox-level change: every grant holder's identity list is stale.

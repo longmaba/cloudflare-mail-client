@@ -7,4 +7,5 @@ export const APP_CLOUDFLARE_API_TOKEN = "test-token";
 export const MAIL_IN_WORKER_NAME = "test-mail-worker";
 export const APP_NAME = "Domain Mail";
 export const MAIL_DOMAIN = "example.test";
+export const MAIL_STAGING_DOMAIN = undefined;
 export const MAIL_ROUTING_MODE = "apex";

@@ -16,6 +16,7 @@
 		pending_zone: 'pending',
 		pending_nameservers: 'pending',
 		wiring: 'pending',
+		staged: 'staged',
 		active: 'active',
 		error: 'failed'
 	};

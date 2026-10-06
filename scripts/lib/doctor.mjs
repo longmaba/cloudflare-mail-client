@@ -63,7 +63,7 @@ async function inspectSendingDomain(config, api) {
   return { status: 'pass', detail: `Cloudflare reports exact domain ${config.mailDomain} sending-enabled. This API does not report separate DNS-verification/delivery state; DNS records and a real reply/header check are still required.` };
 }
 
-export async function inspectInstance(config, secrets, token, { api, fetcher = fetch } = {}) {
+export async function inspectInstance(config, secrets, token, { api, fetcher = fetch, preparingAccounts = false } = {}) {
   // The injected API is a whole-inspector test adapter. Real HTTP requests use
   // separate credentials: infrastructure uses deployment, mail setup uses runtime.
   const runtimeRequest = cloudflare(secrets.runtimeToken, fetcher);
@@ -119,6 +119,15 @@ export async function inspectInstance(config, secrets, token, { api, fetcher = f
       return { status: 'pass', detail: 'Identity, key fingerprint and required bindings match.' };
     });
   }
+  // Preparation reruns may be repairing an interrupted binding deployment.
+  // Their preflight still checks every existing pilot requirement; finishSetup
+  // and standalone doctor always require the final preparation binding.
+  if (config.stagedMailDomain && !preparingAccounts) await check('Production preparation binding', async () => {
+    const settings = await workerSettings(api, config.accountId, config.resourceNames.web);
+    const value = settings?.bindings?.find(binding => binding.name === 'MAIL_STAGING_DOMAIN' && binding.type === 'plain_text')?.text;
+    if (value !== config.stagedMailDomain) throw new Error('The production preparation binding is missing or differs from saved state. Rerun pnpm run setup -- --prepare-apex; existing apex receiving stays unchanged.');
+    return { status: 'pass', detail: 'The exact selected preparation domain is bound; account creation and owner verification remain separate steps.' };
+  });
   await check('Persistent mail storage', async () => {
     const settings = await workerSettings(api, config.accountId, config.resourceNames.web);
     const databaseId = settings?.bindings.find((binding) => binding.name === 'DB')?.id;
@@ -169,5 +178,6 @@ export async function inspectInstance(config, secrets, token, { api, fetcher = f
     return { status: 'pass', detail: 'Login endpoint reachable. Authentication and real send/receive are separate tests.' };
   });
   checks.push({ name: 'Live mail verification', status: 'manual', detail: `Send from controlled Gmail/Outlook to a provisioned @${config.mailDomain} inbox, reply with an attachment, inspect SPF/DKIM/DMARC headers, then check queues and delivery logs. Doctor sends no messages and cannot prove delivery.` });
+  if (config.stagedMailDomain) checks.push({ name: 'Production account preparation', status: 'manual', detail: `@${config.stagedMailDomain} accounts can be prepared by the administrator using external invitations. Receiving stays at the existing apex provider; confirm every owner can sign in before a separate reviewed cutover.` });
   return checks;
 }

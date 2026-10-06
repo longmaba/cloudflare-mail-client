@@ -37,6 +37,7 @@
 		pending_zone: { label: 'Creating zone…', chip: 'pending' },
 		pending_nameservers: { label: 'Awaiting nameservers', chip: 'pending' },
 		wiring: { label: 'Wiring mail…', chip: 'pending' },
+		staged: { label: 'Accounts prepared; mail remains at the existing provider', chip: 'staged' },
 		active: { label: 'Active', chip: 'active' },
 		error: { label: 'Error', chip: 'failed' }
 	};
@@ -145,7 +146,7 @@
 					<StatusChip status={stat.chip} /> {stat.label}
 				</Card.CardDescription>
 			</div>
-			{#if org.status !== 'active' && org.zoneId}
+			{#if org.status !== 'active' && org.status !== 'staged' && org.zoneId}
 				<Button variant="outline" size="sm" disabled={refreshing} onclick={refresh}>
 					{#if refreshing}<Spinner class="mr-1" />{:else}<RefreshCwIcon class="mr-1 size-3.5" />{/if}
 					Refresh
@@ -153,6 +154,9 @@
 			{/if}
 		</Card.CardHeader>
 		<Card.CardContent class="space-y-4">
+			{#if org.status === 'staged'}
+				<p class="text-sm text-muted-foreground">Invite members to choose their passwords and verify recovery addresses. Sending and receiving in this client start after the planned mail migration. DNS and the existing provider are unchanged.</p>
+			{/if}
 			{#if routing?.catchAllAttached === false}
 				<div class="border-destructive/30 bg-destructive/5 space-y-2 rounded-lg border p-3">
 					<p class="text-sm font-medium">Inbound routing isn't attached</p>

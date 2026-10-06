@@ -29,6 +29,17 @@ export function validateConfig(config) {
   if (config.mailDomain !== config.zoneName && !config.mailDomain.endsWith(`.${config.zoneName}`)) throw new Error('The mail domain must belong to the selected zone.');
   if (!['manual', 'apex'].includes(config.routingMode)) throw new Error('Unknown mail routing mode.');
   if (config.routingMode === 'apex' && config.mailDomain !== config.zoneName) throw new Error('Apex routing requires the zone apex as mail domain.');
+  if (config.stagedMailDomain !== undefined && (validateDomain(config.stagedMailDomain) !== config.zoneName || config.stagedMailDomain !== config.zoneName || config.mailDomain === config.zoneName || config.routingMode !== 'manual')) {
+    throw new Error('Account preparation requires the selected zone apex and an unchanged pilot mail domain in manual mode.');
+  }
+  const preparation = config.apexPreparation;
+  if ((config.stagedMailDomain !== undefined && !preparation) ||
+      (preparation !== undefined && (!preparation || typeof preparation !== 'object' ||
+        Array.isArray(preparation) || !config.stagedMailDomain ||
+        !/^before-apex-preparation-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\.json$/.test(preparation.snapshot ?? '') ||
+        !/^[a-f0-9]{64}$/.test(preparation.digest ?? '')))) {
+    throw new Error('Apex preparation metadata is invalid. Restore the original private instance state.');
+  }
   const origin = new URL(config.appOrigin);
   if (origin.protocol !== 'https:' || origin.pathname !== '/' || origin.search || origin.hash || origin.username || origin.password) throw new Error('App origin must be a full HTTPS origin, without a path or credentials.');
   if (origin.hostname !== config.zoneName && !origin.hostname.endsWith(`.${config.zoneName}`)) throw new Error('The app origin must be within the selected zone.');
@@ -67,7 +78,7 @@ export function assertStable(config, secrets, expected = {}) {
 export function deploymentEnv(config, secrets, deployToken, inherited = process.env) {
   assertStable(config, secrets, inherited);
   if (inherited.APP_CLOUDFLARE_API_TOKEN && inherited.APP_CLOUDFLARE_API_TOKEN !== secrets.runtimeToken) throw new Error('Runtime token differs from saved credentials. Run pnpm run setup with the replacement tokens before deploying or upgrading.');
-  return { ...inherited, ...Object.fromEntries(secretNames.map((name) => [name, secrets[name]])), CLOUDFLARE_API_TOKEN: deployToken, CLOUDFLARE_ACCOUNT_ID: config.accountId, APP_CLOUDFLARE_API_TOKEN: secrets.runtimeToken, APP_CLOUDFLARE_ACCOUNT_ID: config.accountId, INSTANCE_ID: config.instanceId, INSTANCE_SLUG: config.instanceSlug, INSTANCE_STAGE: config.stage, MAIL_KEY_FINGERPRINT: config.keyFingerprint, APP_NAME: config.appName, ORIGINS: config.appOrigin, MAIL_DOMAIN: config.mailDomain, MAIL_ROUTING_MODE: config.routingMode, MAIL_ZONE_ID: config.zoneId, MAIL_ZONE_NAME: config.zoneName };
+  return { ...inherited, ...Object.fromEntries(secretNames.map((name) => [name, secrets[name]])), CLOUDFLARE_API_TOKEN: deployToken, CLOUDFLARE_ACCOUNT_ID: config.accountId, APP_CLOUDFLARE_API_TOKEN: secrets.runtimeToken, APP_CLOUDFLARE_ACCOUNT_ID: config.accountId, INSTANCE_ID: config.instanceId, INSTANCE_SLUG: config.instanceSlug, INSTANCE_STAGE: config.stage, MAIL_KEY_FINGERPRINT: config.keyFingerprint, APP_NAME: config.appName, ORIGINS: config.appOrigin, MAIL_DOMAIN: config.mailDomain, MAIL_ROUTING_MODE: config.routingMode, MAIL_STAGING_DOMAIN: config.stagedMailDomain ?? '', MAIL_ZONE_ID: config.zoneId, MAIL_ZONE_NAME: config.zoneName };
 }
 
 export async function atomicJson(path, value) {

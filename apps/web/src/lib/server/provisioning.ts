@@ -13,6 +13,7 @@ import { ensurePersonalMailbox, addressHosts } from "@doota/mail-core/mailbox";
 import { seedWelcomeMessage } from "@doota/mail-core/welcome";
 import { importKey } from "@doota/mail-core/crypto";
 import { ensureMailboxRouting } from "./mail-routing.js";
+import { MAIL_STAGING_DOMAIN } from "$app/env/private";
 
 type Db = DrizzleD1Database<typeof schema>;
 
@@ -93,9 +94,8 @@ export async function provisionUser(
   if (!org?.domain) {
     return { success: false, message: "Organization not found." };
   }
-  // Per-domain accounts may only be created once the domain is active — a
-  // working sending path exists, so the invite mail can actually be delivered.
-  if (org.status !== "active") {
+  const staged = org.status === 'staged' && !!MAIL_STAGING_DOMAIN && org.domain === MAIL_STAGING_DOMAIN;
+  if (org.status !== "active" && !staged) {
     return {
       success: false,
       message: "This domain isn't active yet. Finish onboarding it before adding users.",
@@ -128,6 +128,13 @@ export async function provisionUser(
       success: false,
       message: "You don't have permission to add users to this domain.",
     };
+  }
+
+  // Staged accounts use the active pilot sender for their external invitation.
+  // Reject a missing path before creating an inaccessible account.
+  const stagedSender = staged ? await senderAddress(db, org.domain) : undefined;
+  if (staged && !stagedSender) {
+    return { success: false, message: 'Activate the pilot sending domain before inviting prepared accounts.' };
   }
 
   const password = inaccessiblePassword();
@@ -202,7 +209,7 @@ export async function provisionUser(
     return { success: false, message: "Account created but email routing failed. Finish routing setup before sending an invitation." };
   }
 
-  const from = await senderAddress(db, org.domain);
+  const from = stagedSender ?? await senderAddress(db, org.domain);
 
   // Seed the welcome message so the first login opens on something rather than
   // an empty list. It rides the normal inbound path (encrypted R2 put + queue),

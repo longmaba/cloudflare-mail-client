@@ -10,6 +10,7 @@
 		active: 'ok',
 		read: 'ok',
 		pending: 'warn',
+		staged: 'warn',
 		disabled: 'muted',
 		paused: 'muted',
 		failed: 'bad'

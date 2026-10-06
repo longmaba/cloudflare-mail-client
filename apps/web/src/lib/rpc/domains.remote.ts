@@ -2,7 +2,7 @@
 import { command, query, getRequestEvent } from "$app/server";
 import { error } from "@sveltejs/kit";
 import { z } from "zod";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import * as schema from "@doota/db/schema";
 import { tryCatch } from "$lib/utils/try-catch.js";
 import { setOrgLifecycle } from "$lib/server/auth/escape-hatches.js";
@@ -13,7 +13,7 @@ import {
   mirrorRoutingSubdomains,
   mirrorReturnPathDomain,
 } from "@doota/mail-core/mirror";
-import { MAIL_IN_WORKER_NAME, MAIL_DOMAIN, MAIL_ROUTING_MODE } from "$app/env/private";
+import { MAIL_IN_WORKER_NAME, MAIL_DOMAIN, MAIL_STAGING_DOMAIN, MAIL_ROUTING_MODE } from "$app/env/private";
 import { syncDomainRecipients } from '$lib/server/mail-routing.js';
 import { sendRecoveryEmailVerification } from '$lib/server/recovery-email.js';
 import { senderAddress } from '@doota/db/org-domains';
@@ -170,11 +170,92 @@ export const linkDomain = command(z.string(), async (raw) => {
   return { success: true as const, orgId, status: 'active' as ZoneOnboardStatus };
 });
 
+/** Account preparation has its own installer scope and never wires mail. */
+async function stagingZone(raw: string) {
+  const domain = raw.trim().toLowerCase();
+  if (!MAIL_STAGING_DOMAIN || domain !== MAIL_STAGING_DOMAIN || !MAIL_DOMAIN ||
+      MAIL_ROUTING_MODE !== 'manual' || !MAIL_DOMAIN.endsWith(`.${domain}`)) {
+    error(400, 'Use the account preparation domain selected by the installer.');
+  }
+  const zone = await findMailZone(MAIL_DOMAIN);
+  if (!zone || zone.name !== domain || zone.status !== 'active') {
+    error(400, 'The active parent zone must match the account preparation domain. Run doctor.');
+  }
+  const primary = await getRequestEvent().locals.db.query.organization.findFirst({
+    where: eq(schema.organization.domain, MAIL_DOMAIN),
+    columns: { status: true, zoneId: true },
+  });
+  if (primary?.status !== 'active' || primary.zoneId !== zone.id) {
+    error(400, 'Activate the selected pilot domain before preparing production accounts.');
+  }
+  return zone;
+}
+
+const STAGING_RESERVATION = 'cloudflare-mail-client:account-staging';
+
+function matchesStagingReservation(metadata: string | null, domain: string, zoneId: string) {
+  try {
+    const marker = JSON.parse(metadata ?? 'null')?.[STAGING_RESERVATION];
+    return marker?.version === 1 && marker.domain === domain &&
+      marker.primaryDomain === MAIL_DOMAIN && marker.zoneId === zoneId;
+  } catch {
+    return false;
+  }
+}
+
+export const stageDomain = command(z.string(), async (raw) => {
+  const actor = requireSuperadmin();
+  const zone = await stagingZone(raw);
+  const { locals, request } = getRequestEvent();
+  const existing = await locals.db.query.organization.findFirst({
+    where: eq(schema.organization.domain, zone.name),
+  });
+  if (existing) {
+    if (existing.status === 'pending_zone' && (!existing.zoneId || existing.zoneId === zone.id) &&
+        matchesStagingReservation(existing.metadata, zone.name, zone.id)) {
+      // Better Auth persists the marked org before its owner membership. A
+      // stopped request may therefore need both writes completed on retry.
+      const owner = await locals.db.query.member.findFirst({
+        where: and(eq(schema.member.organizationId, existing.id), eq(schema.member.role, 'owner')),
+        columns: { id: true },
+      });
+      if (!owner) {
+        await locals.auth.api.addMember({
+          body: { organizationId: existing.id, userId: actor.id, role: 'owner' },
+          headers: request.headers,
+        });
+      }
+      await setOrgLifecycle(existing.id, 'staged', zone.id);
+      return { success: true as const, orgId: existing.id, status: 'staged' as const };
+    }
+    if (existing.zoneId !== zone.id || !['staged', 'active'].includes(existing.status)) {
+      error(409, 'This domain already has incompatible setup state. Repair it before preparing accounts.');
+    }
+    return { success: true as const, orgId: existing.id, status: existing.status as 'staged' | 'active' };
+  }
+  const created = await locals.auth.api.createOrganization({
+    // Metadata is stored in Better Auth's organization INSERT, allowing a safe
+    // retry after interruption without adopting an unrelated pending domain.
+    body: { name: zone.name, slug: zone.name.replace(/\./g, '-'), domain: zone.name,
+      metadata: { [STAGING_RESERVATION]: { version: 1, domain: zone.name, primaryDomain: MAIL_DOMAIN, zoneId: zone.id } },
+      keepCurrentActiveOrganization: true },
+    headers: request.headers,
+  });
+  if (!created?.id) error(500, 'Could not create the organization.');
+  await setOrgLifecycle(created.id, 'staged', zone.id);
+  return { success: true as const, orgId: created.id, status: 'staged' as const };
+});
+
 export const refreshDomain = command(z.string(), async (orgId) => {
   requireSuperadmin();
   const { locals } = getRequestEvent();
   const org = await locals.db.query.organization.findFirst({ where: eq(schema.organization.id, orgId) });
   if (!org) error(404, 'Organization not found');
+  if (org.status === 'staged') {
+    const zone = await stagingZone(org.domain);
+    if (org.zoneId !== zone.id) error(409, 'The prepared domain belongs to a different zone. Run doctor.');
+    return { status: 'staged' as const, nameServers: [] };
+  }
   configuredDomain(org.domain);
   const zone = org.zoneId ? await pollZoneStatus(org.zoneId) : await findMailZone(org.domain);
   if (!zone) error(400, 'The selected zone was not found. Run doctor.');
@@ -187,7 +268,19 @@ export const listCloudflareZones = command(async () => {
   requireSuperadmin();
   if (!MAIL_DOMAIN) error(400, 'MAIL_DOMAIN is missing. Run setup.');
   const zone = await findMailZone(MAIL_DOMAIN);
-  return zone ? [{ id: zone.id, name: MAIL_DOMAIN, active: zone.status === 'active', onboarded: false, configured: false }] : [];
+  if (!zone) return [];
+  const domains = [{ id: zone.id, name: MAIL_DOMAIN, active: zone.status === 'active', preparation: false }];
+  if (MAIL_STAGING_DOMAIN === zone.name && MAIL_ROUTING_MODE === 'manual' &&
+      MAIL_DOMAIN.endsWith(`.${zone.name}`)) {
+    const primary = await getRequestEvent().locals.db.query.organization.findFirst({
+      where: eq(schema.organization.domain, MAIL_DOMAIN),
+      columns: { status: true, zoneId: true },
+    });
+    domains.push({ id: zone.id, name: zone.name,
+      active: zone.status === 'active' && primary?.status === 'active' && primary.zoneId === zone.id,
+      preparation: true });
+  }
+  return domains;
 });
 
 /**

@@ -140,6 +140,11 @@
 				</Button>
 			{/snippet}
 		</TopBar>
+		{#if data.preparedDomain}
+			<div role="status" class="border-warn/40 bg-warn/10 border-b px-4 py-2 text-sm">
+				Your {data.preparedDomain} account is prepared. You can finish password, recovery and security setup. Mail for this domain still arrives at the existing provider; sending and receiving for this domain begin after migration.
+			</div>
+		{/if}
 		{#if network.offline}
 			<div
 				role="status"

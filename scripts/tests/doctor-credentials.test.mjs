@@ -19,6 +19,7 @@ function fixture(options = {}) {
   const bindings = [
     ...Object.entries(values).map(([name, text]) => ({ name, text, type: 'plain_text' })),
     ...['DB', 'AUTH_KV', 'MAIL_RAW', 'MAIL_QUEUE', 'MAIL_OUT_QUEUE', 'MAIL_EVENTS', 'EMAIL_SENDER', 'APP_CLOUDFLARE_API_TOKEN'].map((name) => ({ name, id: name === 'DB' ? 'database-id' : undefined })),
+    ...(options.stagingBinding ? [{ name: 'MAIL_STAGING_DOMAIN', text: options.stagingBinding, type: 'plain_text' }] : []),
   ];
   const calls = [];
   const fetcher = async (url, request = {}) => {
@@ -66,7 +67,7 @@ function fixture(options = {}) {
     ];
     return new Response(JSON.stringify({ success: true, result, result_info: { total_pages: 1 } }));
   };
-  const inspect = (secrets = { runtimeToken }) => inspectInstance(config, secrets, deploymentToken, { fetcher });
+  const inspect = (secrets = { runtimeToken }, options = {}) => inspectInstance(config, secrets, deploymentToken, { fetcher, ...options });
   return { config, calls, inspect };
 }
 
@@ -78,6 +79,24 @@ test('doctor uses runtime token for scoped routing/sending and deployment token 
   assert.ok(calls.some((call) => call.path.endsWith('/email/sending/subdomains')));
   for (const call of calls.filter((call) => call.path.includes('/email/'))) assert.equal(call.authorization, `Bearer ${runtimeToken}`);
   for (const call of calls.filter((call) => call.path.startsWith('/accounts/'))) assert.equal(call.authorization, `Bearer ${deploymentToken}`);
+});
+
+test('doctor verifies the exact preparation binding without declaring production mail active', async () => {
+  for (const stagingBinding of [undefined, 'foreign.test', 'example.com']) {
+    const { config, inspect } = fixture({ stagingBinding });
+    config.stagedMailDomain = config.zoneName;
+    const checks = await inspect();
+    assert.equal(checks.find(check => check.name === 'Production preparation binding').status, stagingBinding === config.zoneName ? 'pass' : 'fail');
+    assert.match(checks.find(check => check.name === 'Production account preparation').detail, /Receiving stays at the existing apex provider/);
+  }
+});
+
+test('preparation preflight can resume a missing binding but still requires all pilot diagnostics', async () => {
+  const { config, inspect } = fixture({ recipientRules: [] });
+  config.stagedMailDomain = config.zoneName;
+  const checks = await inspect(undefined, { preparingAccounts: true });
+  assert.ok(!checks.some(check => check.name === 'Production preparation binding'));
+  assert.equal(checks.find(check => check.name === 'Recipient Email Routing').status, 'fail');
 });
 
 test('apex routing settings and catch-all diagnostic reads also use the scoped runtime token', async () => {

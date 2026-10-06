@@ -64,6 +64,47 @@ Database migrations may not be backward compatible: take a matched backup first.
 source rollback does not undo a database migration. Restore a matched snapshot
 when a previous release requires the previous schema.
 
+## Prepare production accounts
+
+After successful pilot delivery and a matched backup, run
+`pnpm run setup -- --prepare-apex` from the saved instance checkout. Required
+pilot doctor checks must pass first. The installer records the complete zone
+DNS, including existing record IDs, content, priorities and TTLs, in a protected
+`.local/before-apex-preparation-*.json` file. It retains the primary pilot domain,
+manual routing, resource names and encryption keys. A rerun reuses this snapshot;
+missing or changed evidence blocks preparation instead of overwriting it.
+Take another fresh snapshot immediately before a future cutover: this account
+preparation snapshot may become stale.
+
+Open **Admin → Organizations → Add organization → Prepare accounts** for the
+selected apex. This creates a **staged** organization without changing mail DNS,
+Routing rules or native sending registrations. A staged Refresh remains
+read-only. Existing pilot accounts and delivery stay active.
+
+Add each separate-login owner under the staged organization's **Members** tab,
+providing the assigned local part and an external recovery address. Invitations
+come from the active pilot domain; each owner chooses a password, verifies their
+external recovery address and optionally enrolls MFA/passkeys. Administrators
+still require TOTP. Invitation/reset links are single-use and expire after ten
+minutes. Public registration is disabled.
+
+Staged accounts can sign in and save drafts. Sending is rejected before enqueue
+and a rejected draft stays editable; mail still reaches the old receiving
+provider. Recipient rules are deferred until reviewed mail activation. Confirm
+that every required production recipient has a working login and verified
+external recovery before cutover. Keep the old receiver available for at least
+seven days afterward and retain it for historical messages.
+
+Preparation does not replace existing MX or merge SPF, and the web activation
+guard continues to refuse conflicting old-provider records. Do not edit the
+saved primary domain, delete Google records, or mark an organization active to
+bypass this guard. A separate reviewed cutover must record exact DNS changes,
+readiness checks and rollback; see [the first deployment](KIENG-PILOT.md).
+
+If provisioning reports that an account exists but invitation delivery failed,
+use **Forgot password** for that domain login after repairing its mailbox or
+sending path. Repeating installer setup does not recreate users or resend links.
+
 ## Failed inbound mail
 
 Raw mail is encrypted and stored before enqueueing. Durable receipts identify

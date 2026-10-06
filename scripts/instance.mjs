@@ -10,6 +10,7 @@ import { inspectInstance } from './lib/doctor.mjs';
 import { assertUpgradeTarget } from './lib/upgrade.mjs';
 import { captureD1RestorePoint } from './lib/backup.mjs';
 import { presentBootstrap, saveBootstrapLink } from './lib/bootstrap.mjs';
+import { prepareApexAccounts } from './lib/apex-preparation.mjs';
 
 export const paidRequirement = 'Cloudflare Workers Paid is required: $5/month base, including 3,000 outbound emails each month. Additional email usage and usage above included compute/storage quotas are billed separately. Email Routing receiving alone is free; this mailbox uses paid native outbound sending.\n';
 
@@ -103,11 +104,12 @@ async function deploy(instance, token) {
   await saveInstance(projectRoot, config, secrets);
 }
 
-async function setup() {
+async function setup({ prepareApex = false } = {}) {
   process.stdout.write(paidRequirement);
   process.stdout.write('Credentials: create separate custom deployment and runtime tokens at https://dash.cloudflare.com/profile/api-tokens, restricted to your account and zone. Follow docs/TOKENS.md for the exact permission matrix and Email Service activation. Never use a Global API Key.\n');
-  await installDependencies();
   const existing = await readInstance(projectRoot);
+  if (prepareApex && !existing) throw new Error('Run setup and verify a pilot before using --prepare-apex.');
+  await installDependencies();
   const auth = await credentials(existing);
   let instance = existing;
   if (!instance) {
@@ -153,10 +155,23 @@ async function setup() {
   } else {
     process.stdout.write(`Resuming ${instance.config.instanceSlug}/${instance.config.stage}; saved account, resource names and keys are reused.\n`);
   }
+  if (prepareApex) {
+    await guardDeployment(instance.config, instance.secrets, auth.token);
+    const pilotChecks = await inspectInstance(instance.config, instance.secrets, auth.token, { preparingAccounts: true });
+    printChecks(pilotChecks);
+    if (pilotChecks.some(check => check.status === 'fail')) throw new Error('Resolve pilot doctor failures before preparing production accounts. Apex receiving configuration was not changed.');
+    const settings = await workerSettings(cloudflare(auth.token), instance.config.accountId, instance.config.resourceNames.web);
+    const values = Object.fromEntries((settings?.bindings ?? []).filter(binding => binding.type === 'plain_text').map(binding => [binding.name, binding.text]));
+    if (values.MAIL_DOMAIN !== instance.config.mailDomain || values.MAIL_ROUTING_MODE !== 'manual') throw new Error('The deployed pilot mail domain differs from saved state. Restore its original configuration before preparing accounts.');
+    instance.config = await prepareApexAccounts(projectRoot, instance.config, instance.secrets, cloudflare(auth.token));
+    await saveInstance(projectRoot, instance.config, instance.secrets);
+    process.stdout.write(`Preparing accounts for @${instance.config.stagedMailDomain}. Primary mail stays @${instance.config.mailDomain}; existing apex MX/SPF and routing are unchanged. A protected DNS snapshot is saved in .local/. This enables administrator invitations only, not receiving activation.\n`);
+  }
   // Save the same one-use URL before deploy so an interrupted run can resume.
   await saveBootstrapLink(instance.config, instance.secrets);
   await deploy(instance, auth.token);
   const checks = await finishSetup(instance, auth.token);
+  if (prepareApex) process.stdout.write(`\nOpen ${instance.config.appOrigin}/admin/organizations, choose Prepare accounts for ${instance.config.stagedMailDomain}, then invite each owner using an external recovery address. Mail remains with the existing provider until a separate reviewed cutover.\n`);
   if (checks.some((check) => check.status === 'fail')) process.exitCode = 1;
 }
 
@@ -228,12 +243,13 @@ async function upgrade(args) {
 export async function main(args = process.argv.slice(2)) {
   const [command = 'setup', ...rest] = args.filter((argument) => argument !== '--');
   if (rest.includes('--help') || command === '--help') {
-    process.stdout.write('pnpm run setup | pnpm run doctor | pnpm run upgrade -- --tag <published-tag>\nSetup deploys the app after saving private config; doctor is read-only; upgrade preserves the saved instance.\n');
+    process.stdout.write('pnpm run setup [-- --prepare-apex] | pnpm run doctor | pnpm run upgrade -- --tag <published-tag>\nSetup deploys the app after saving private config; --prepare-apex enables production account invitations while preserving pilot/apex receiving; doctor is read-only; upgrade preserves the saved instance.\n');
     return;
   }
   await validateTools();
   if (command === 'doctor') return doctor();
   if (command === 'setup' && !rest.length) return withInstallLock(projectRoot, setup);
+  if (command === 'setup' && rest.length === 1 && rest[0] === '--prepare-apex') return withInstallLock(projectRoot, () => setup({ prepareApex: true }));
   if (command === 'upgrade') return withInstallLock(projectRoot, () => upgrade(rest));
   throw new Error('Unknown command. Use setup, doctor or upgrade --tag <published-tag>.');
 }

@@ -28,7 +28,10 @@ export type SendIdentity = {
   /** the underlying mailbox is the user's personal inbox (not shared/service);
    * used to pick a default From when there's no mailbox context. */
   isPersonal: boolean;
+  /** Sending readiness; the authoritative send path still revalidates it. */
   available: boolean;
+  /** An active granted mailbox may save drafts before its staged domain migrates. */
+  draftAvailable: boolean;
   reason?: string;
 };
 
@@ -63,12 +66,16 @@ export async function listSendIdentities(db: Db, userId: string): Promise<SendId
     columns: { id: true, mailboxId: true, address: true, label: true },
   });
 
-  function availability(box: { orgId: string; isActive: boolean }): { available: boolean; reason?: string } {
-    if (!box.isActive) return { available: false, reason: "This mailbox is inactive." };
-    if (orgStatus.get(box.orgId) !== "active") {
-      return { available: false, reason: "This domain isn't active yet (email sending not wired)." };
+  function availability(box: { orgId: string; isActive: boolean }): Pick<SendIdentity, "available" | "draftAvailable" | "reason"> {
+    if (!box.isActive) return { available: false, draftAvailable: false, reason: "This mailbox is inactive." };
+    const status = orgStatus.get(box.orgId);
+    if (status === "staged") {
+      return { available: false, draftAvailable: true, reason: "Drafts can be saved. Sending starts after domain migration." };
     }
-    return { available: true };
+    if (status !== "active") {
+      return { available: false, draftAvailable: false, reason: "This domain isn't active yet (email sending not wired)." };
+    }
+    return { available: true, draftAvailable: true };
   }
 
   const out: SendIdentity[] = [];

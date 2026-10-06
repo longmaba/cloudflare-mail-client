@@ -9,6 +9,7 @@ import { appendQuotedHistory } from "./outbound-content";
 import { readableMessageReference } from "./message-access";
 import { extractInlineImages } from "./inline-images";
 import { assertOutboundSize } from "./outbound-size";
+import { assertDomainNotStaged } from "./resolver";
 import {
   materializeMessage,
   materializeDelivery,
@@ -137,6 +138,9 @@ export async function enqueueSend(
     };
   }
 
+  // Also covers internal vacation, RSVP and rule-forward sends that do not use
+  // an interactive identity resolver. Returning an existing send stays idempotent.
+  await assertDomainNotStaged(db, req.orgId);
   const now = Date.now();
   const sentAt = req.sendAt ?? now;
 

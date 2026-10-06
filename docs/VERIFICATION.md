@@ -1,6 +1,6 @@
 # Release verification
 
-Release candidate: `v0.1.0-rc.4`. Verification date: 2026-10-06.
+Release candidate: `v0.1.0-rc.5`. Verification date: 2026-10-06.
 
 ## Automated evidence
 
@@ -10,8 +10,8 @@ On Windows with Node 24.12.0 and pnpm 10.26.2:
 | --- | --- |
 | Frozen workspace and infrastructure installs | Passed |
 | Workspace type and Svelte checks | Passed, zero errors and warnings |
-| Application tests | 82 files, 848 tests passed |
-| Portable installer tests | 72 tests passed; migration, credential replacement, live API responses and pre-upgrade restore points |
+| Application tests | 86 files, 893 tests passed |
+| Portable installer tests | 79 tests passed; preparation snapshots/bindings, migration, credential replacement, live API responses and pre-upgrade restore points |
 | Infrastructure TypeScript check | Passed |
 | Production Cloudflare build | Passed |
 | Local D1 migrations | All migrations through `0058` applied |
@@ -27,6 +27,25 @@ Account-switch regressions cover releasing offline database ownership while
 preserving other users' files and multiple-tab refusal, clearing another user's
 remembered mailbox, and retaining the same user's offline selection.
 
+Production account preparation tests cover the exact installer scope, active
+pilot/parent-zone prerequisites, read-only staging/refresh, safe retries after
+interrupted organization/owner writes, and refusal to demote active domains or
+adopt unrelated pending state. Staged invitations require an active fallback
+sender before creating a user. A real Better Auth integration redeems a staged
+member's private setup link, verifies external recovery and signs in. Sender
+checks reject staged interactive/API/draft and internal enqueue attempts before
+mail/submission/queue creation; draft content and revision remain editable.
+Protected DNS snapshot reruns preserve the original evidence, keys and resource
+names, and doctor verifies the deployed preparation binding. Preparation leaves
+apex DNS, mail routing rules and sending registrations unchanged.
+
+Staged sender identities remain unavailable for sending while permitting owned
+draft creation and editing in Compose. Compose and inline Reply show the readiness
+reason and keep Send disabled. Sender identity cache versioning retains its user
+namespace. Cold imports on a 28-CPU Windows host exposed full-suite timing
+contention; limiting worker concurrency to at most eight (and below the host CPU
+allocation) passed all tests with the original assertion and hook deadlines.
+
 The GitHub Actions matrix runs frozen installs, installer tests, checks,
 application tests and production builds on Windows, macOS and Linux. Its
 [current results](https://github.com/longmaba/cloudflare-mail-client/actions)
@@ -40,6 +59,11 @@ all eight workflow commands using checksum-verified Node 24.12.0 and pnpm
 10.26.2: frozen installs, generation, 72 installer tests, zero-error checks,
 848 application tests, production build and infrastructure check. This proves
 native Linux execution; it does not claim the hosted Ubuntu job passed.
+
+The follow-up [RC4 run](https://github.com/longmaba/cloudflare-mail-client/actions/runs/37371631134)
+passed all three hosted platforms at `54b0f033d61145747088e022f054dddd5b2fd713`;
+that commit changed only this document from the immutable RC4 tag. RC5
+cross-platform status must be read from its own run, not inferred from RC4.
 
 Recovery tests also passed with Windows CRLF checkouts. An actual read-only
 local Wrangler D1 query confirmed that the recovery command preserves JSON
@@ -94,6 +118,17 @@ Run the reusable harness with the fixture instructions in
 [CONTRIBUTING.md](../CONTRIBUTING.md). External recovery delivery and incoming
 raw attachment rendering remain outside this
 browser evidence; their automated coverage does not replace live acceptance.
+
+RC5 staged account behavior passed in local Chrome against the production
+bundle. An ordinary synthetic member created and edited a draft through Compose;
+Send remained disabled with the migration reason. An authenticated attempt to
+send that owned draft returned HTTP 409 without mail, recipient, submission,
+event or job additions. The retained draft reopened and remained editable through
+Drafts. A foreign mailbox returned HTTP 403, and the prepared-account banner
+accurately described old-provider delivery. There were zero browser errors,
+external HTTP requests or unexpected send/recovery requests. The original
+organization status, draft IDs and session IDs were restored, the browser and
+preview stopped, and private local environment bytes restored exactly.
 
 [Screenshots](screenshots.md) use only local synthetic accounts and mail.
 Synthetic fixture accounts have pre-completed onboarding; they do not prove

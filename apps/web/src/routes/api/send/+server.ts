@@ -2,7 +2,7 @@
 import { json, error, type RequestHandler } from "@sveltejs/kit";
 import { bearerFromHeaders, verifyApiKey } from "$lib/server/auth/api-key.js";
 import { enqueueSend, type OutboundEnv } from "@doota/mail-core/outbound";
-import { resolveSender, resolveServiceSender } from "@doota/mail-core/resolver";
+import { resolveSender, resolveServiceSender, assertDomainNotStaged } from "@doota/mail-core/resolver";
 import { logSendEvent } from "@doota/mail-core/send-log";
 import { tryLog } from "@doota/mail-core/log";
 import { loadTemplateForSend, renderTemplate, sensitiveKeysOf } from "$lib/server/templates.js";
@@ -56,6 +56,7 @@ export const POST: RequestHandler = async ({ request, locals, platform, url }) =
   } else {
     error(401, "This key is no longer valid.");
   }
+  await assertDomainNotStaged(locals.db, sender.orgId);
   const createdByUserId = actor.isService ? null : actor.userId;
   const parentMessageId = typeof body.parentMessageId === "string" ? body.parentMessageId : null;
   if (parentMessageId) {

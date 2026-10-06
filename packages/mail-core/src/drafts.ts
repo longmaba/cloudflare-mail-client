@@ -7,7 +7,7 @@ import * as mail from "@doota/db/mail.schema";
 import { decryptContent, encryptContent, putEncryptedBlob, type ContentKey } from "./crypto";
 import { sanitizeEmailHtml } from "./sanitize-email";
 import { messageRawHtml, type CacheLike } from "./mime";
-import { resolveSender } from "./resolver";
+import { resolveSender, assertDomainNotStaged } from "./resolver";
 import { enqueueSend, cancelSend, type OutboundEnv } from "./outbound";
 import { plaintextIndex } from "./search-index";
 import { notifySubmissionState } from "./events-hub";
@@ -709,6 +709,11 @@ export async function sendDraft(
   const row = await ownDraftRow(db, input.draftId, userId);
   if (row.status !== "editing") error(409, "This draft has already been sent.");
 
+  // Recheck identity and staged-domain readiness before claiming the draft or
+  // copying attachments; preparation must leave its editable content intact.
+  const sender = await resolveSender(db, userId, row.mailboxId, row.fromAliasId);
+  await assertDomainNotStaged(db, sender.orgId);
+
   // Claim the draft (editing → sending) with a compare-and-set before building
   // the submission. Two concurrent Sends of the same draft both pass the status
   // read above; without the claim both would enqueue — duplicate mail on the
@@ -726,8 +731,6 @@ export async function sendDraft(
     const bcc = jsonArray<string>(row.bccAddrs);
     if (to.length + cc.length + bcc.length === 0) error(400, "At least one recipient is required.");
 
-    // Same server-side identity re-check the interactive send does.
-    const sender = await resolveSender(db, userId, row.mailboxId, row.fromAliasId);
     const [subject, body] = await Promise.all([
       decryptContent(ck, row.subjectEnc),
       decryptContent(ck, row.bodyEnc),

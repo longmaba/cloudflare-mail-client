@@ -8,8 +8,8 @@
 	import type { SendIdentity } from '@doota/mail-core/identities';
 
 	// Identity picker for hide-my-email. Addresses render in JetBrains Mono
-	// (font-mono) per the design system; an unavailable identity (domain not
-	// active) is shown disabled with its reason rather than hidden.
+	// (font-mono) per the design system. Staged identities can save drafts;
+	// identities unable to save drafts remain disabled with their reason.
 	let {
 		identities,
 		mailboxId = $bindable(),
@@ -26,7 +26,7 @@
 	);
 
 	function pick(identity: SendIdentity) {
-		if (!identity.available) return;
+		if (!identity.draftAvailable) return;
 		mailboxId = identity.mailboxId;
 		aliasId = identity.aliasId;
 	}
@@ -43,10 +43,10 @@
 		{/snippet}
 	</DropdownMenu.Trigger>
 	<DropdownMenu.Content class="w-72" align="start" sideOffset={6}>
-		<DropdownMenu.Label class="text-muted-foreground text-xs">Send as</DropdownMenu.Label>
+		<DropdownMenu.Label class="text-muted-foreground text-xs">From</DropdownMenu.Label>
 		{#each identities as identity (key(identity))}
 			<DropdownMenu.Item
-				disabled={!identity.available}
+				disabled={!identity.draftAvailable}
 				onSelect={() => pick(identity)}
 				class="flex-col items-start gap-0.5"
 			>

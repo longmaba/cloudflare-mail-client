@@ -400,7 +400,8 @@
 		if (draftId && !hasBody && attachments.length === 0) void discardDraftById({ draftId });
 	});
 
-	const canSend = $derived((hasBody || attachments.length > 0) && hasRecipient);
+	const selectedIdentity = $derived(identities.find((identity) => identity.mailboxId === sendMailboxId && (identity.aliasId ?? null) === (aliasId ?? null)));
+	const canSend = $derived(!!selectedIdentity?.available && (hasBody || attachments.length > 0) && hasRecipient);
 
 	async function send() {
 		if (!canSend || sending) return;
@@ -668,7 +669,7 @@
 				{:else}
 					<span class="text-faint hidden text-[11px] sm:inline">⌘↵ to send</span>
 				{/if}
-				<Button variant="brand" size="sm" class="gap-1.5" disabled={!canSend || sending || uploading} onclick={send}>
+				<Button variant="brand" size="sm" class="gap-1.5" disabled={!canSend || sending || uploading} title={!selectedIdentity?.available ? selectedIdentity?.reason ?? 'This sending identity is unavailable' : undefined} onclick={send}>
 					{#if sending}
 						<Spinner class="size-3.5" /> Sending…
 					{:else}

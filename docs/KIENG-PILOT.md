@@ -35,9 +35,17 @@ this historical public snapshot is not a complete zone backup.
 
 Perform only after pilot acceptance. Export the zone and store current record
 IDs, content, priority and TTL in private deployment state. Provision production
-addresses and exact routing rules before replacing apex mail DNS. Change the
-configured mail domain deliberately, select apex mode, then review the complete
-change list. Do not make that change as a pilot repair.
+accounts using `pnpm run setup -- --prepare-apex`, then **Prepare accounts** in
+Admin → Organizations. Each owner receives a private setup link at their
+external recovery address. This stages the apex organization while preserving
+the pilot's primary domain, manual mode and Google MX/SPF. Confirm every owner's
+login and recovery verification before cutover; staged mailboxes cannot send.
+
+The preparation command does not perform cutover. Exact production recipient
+rules, a reviewed SPF merge, receiving DNS replacement and domain activation
+must be reconciled through a recorded resumable migration before production
+delivery starts. Do not change the saved primary domain or delete Google MX as
+a pilot repair, or mark a staged organization active to bypass readiness checks.
 
 Keep the old receiving service available for at least seven days, check both
 inboxes during DNS propagation, and retain the old provider for historical mail.

@@ -26,6 +26,7 @@ export type ZoneOnboardStatus =
   | "pending_zone"
   | "pending_nameservers"
   | "wiring"
+  | "staged"
   | "active"
   | "error";
 

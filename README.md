@@ -49,6 +49,21 @@ the same build/deploy path. Take a matched backup before schema migrations.
 Cloudflare's deploy button does not support this three-Worker deployment:
 [deployment limitations](https://developers.cloudflare.com/workers/platform/deploy-buttons/).
 
+After pilot acceptance, prepare production accounts before changing the old
+provider's receiving DNS:
+
+```sh
+pnpm run setup -- --prepare-apex
+```
+
+This saves a protected full-zone DNS snapshot and enables **Prepare accounts**
+for the selected zone apex under **Admin → Organizations**. Invite each owner
+using an external recovery email; owners choose their own passwords using the
+single-use setup link. The staged organization can complete account setup and
+save drafts, but cannot send mail. The pilot remains active and existing apex
+MX/SPF records stay unchanged. Preparation is not a DNS cutover; see
+[operations](docs/OPERATIONS.md#prepare-production-accounts).
+
 ## Credentials and activation
 
 Enable Workers Paid and Email Service sending for your account before testing

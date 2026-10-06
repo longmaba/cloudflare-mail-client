@@ -1,6 +1,7 @@
 import { defineConfig } from "vitest/config";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
 import { fileURLToPath } from "node:url";
+import { availableParallelism } from "node:os";
 
 const r = (p: string) => fileURLToPath(new URL(p, import.meta.url));
 
@@ -27,5 +28,9 @@ export default defineConfig({
   test: {
     environment: "node",
     include: ["src/**/*.test.ts"],
+    // Each worker transforms Svelte/SDK fixtures and initializes SQLite schemas.
+    // Large worker fan-out can exhaust test deadlines on cold imports;
+    // preserve those deadlines while respecting smaller CI CPU allocations.
+    maxWorkers: Math.max(1, Math.min(8, availableParallelism() - 1)),
   },
 });

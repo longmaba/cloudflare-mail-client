@@ -4,6 +4,8 @@ import { eq, like } from "drizzle-orm";
 import * as schema from "@doota/db/schema";
 import { makeDb } from "./mail-db";
 import { setRequestEvent } from "./stubs/app-server";
+import { invalidateDomainCache } from '@doota/db/org-domains';
+import { getOnboardingStatus } from '$lib/server/onboarding.js';
 
 vi.mock("$lib/server/mailer", () => ({ sendMailBackground: vi.fn() }));
 import { sendMailBackground } from "$lib/server/mailer";
@@ -23,6 +25,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  invalidateDomainCache();
   for (const table of [schema.session, schema.account, schema.verification, schema.member, schema.organization, schema.user]) {
     await db.delete(table);
   }
@@ -67,6 +70,19 @@ describe("Better Auth recovery link integration", () => {
     await auth.api.resetPassword({ body: { token, newPassword: "chosen-password" }, headers });
     expect(await db.query.user.findFirst()).toMatchObject({ recoveryEmailVerified: true, mustChangePassword: false });
     await expect(auth.api.resetPassword({ body: { token, newPassword: "another-password" }, headers })).rejects.toThrow(/invalid|expired/i);
+  });
+
+  it('lets a staged member choose a password, prove external recovery and sign in using the active pilot sender', async () => {
+    await db.update(schema.organization).set({ status: 'staged' }).where(eq(schema.organization.id, 'o1'));
+    await db.insert(schema.organization).values({ id: 'pilot', domain: 'pilot.example.test', name: 'Pilot', slug: 'pilot', status: 'active', createdAt: new Date() });
+    const token = await requestLink();
+    expect(vi.mocked(sendMailBackground).mock.calls[0][0].from).toMatchObject({ email: 'no-reply@pilot.example.test' });
+    await auth.api.resetPassword({ body: { token, newPassword: 'chosen-password' }, headers });
+    const signedIn = await auth.api.signInEmail({ body: { email: domainEmail, password: 'chosen-password' }, headers });
+    expect(signedIn.user.email).toBe(domainEmail);
+    expect(await getOnboardingStatus(db, { id: 'u1', role: 'member' })).toMatchObject({ complete: true });
+    expect(await db.query.organization.findFirst({ where: eq(schema.organization.id, 'o1') })).toMatchObject({ status: 'staged' });
+    await expect(auth.api.resetPassword({ body: { token, newPassword: 'another-password' }, headers })).rejects.toThrow(/invalid|expired/i);
   });
 
   it("a reset revokes old sessions without removing enrolled administrator TOTP", async () => {

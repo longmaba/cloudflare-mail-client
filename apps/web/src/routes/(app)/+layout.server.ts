@@ -2,6 +2,9 @@
 import { redirect } from "@sveltejs/kit";
 import { getAuthz } from "$lib/server/authz.js";
 import { cachedSendIdentities } from "$lib/server/mail-cache.js";
+import { and, eq } from "drizzle-orm";
+import * as schema from "@doota/db/schema";
+import { MAIL_STAGING_DOMAIN } from "$app/env/private";
 
 export const load = async ({ locals, platform }) => {
   const user = locals.user;
@@ -12,6 +15,13 @@ export const load = async ({ locals, platform }) => {
   // snapshot, and the first composer open reads identities from KV instead of
   // running its 5 D1 queries. Already-warm entry = 2 cheap KV reads.
   platform?.ctx?.waitUntil?.(Promise.allSettled([getAuthz(), cachedSendIdentities()]));
+  const stagedMembership = MAIL_STAGING_DOMAIN && user.email.toLowerCase().endsWith(`@${MAIL_STAGING_DOMAIN}`) ? await locals.db
+    .select({ domain: schema.organization.domain })
+    .from(schema.member)
+    .innerJoin(schema.organization, eq(schema.member.organizationId, schema.organization.id))
+    .where(and(eq(schema.member.userId, user.id), eq(schema.organization.domain, MAIL_STAGING_DOMAIN),
+      eq(schema.organization.status, 'staged')))
+    .limit(1) : [];
   // superadmin is external, has no mailbox → no /app.
   // if (user.role === "superadmin") redirect(302, "/admin");
   return {
@@ -25,5 +35,6 @@ export const load = async ({ locals, platform }) => {
     // Set by hooks.server.ts when this member's org now requires 2FA and they're
     // still inside the grace window — drives the nudge banner (docs/2fa.md).
     enroll2faBy: locals.enroll2faBy ?? null,
+    preparedDomain: stagedMembership[0]?.domain ?? null,
   };
 };

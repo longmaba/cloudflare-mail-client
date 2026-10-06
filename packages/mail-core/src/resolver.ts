@@ -179,5 +179,14 @@ export async function resolveServiceSender(
   return { orgId: box.orgId, fromAddress, fromName: box.displayName, fromAliasId: resolvedAliasId };
 }
 
+/** Read after sender authorization, before queue/storage changes. The delivery
+ * consumer independently checks domain readiness again at delivery time. */
+export async function assertDomainNotStaged(db: Db, orgId: string): Promise<void> {
+  const org = await db.query.organization.findFirst({
+    where: eq(schema.organization.id, orgId), columns: { status: true },
+  });
+  if (org?.status === "staged") error(409, "This mailbox is prepared. Mail stays with your existing provider until the administrator completes migration.");
+}
+
 /** Convenience for callers that only have an address string. */
 export { domainOf };

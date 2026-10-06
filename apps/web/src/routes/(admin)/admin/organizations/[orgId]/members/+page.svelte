@@ -93,6 +93,9 @@
 			</Button>
 		{/snippet}
 	</PageHeader>
+	{#if org.status === 'staged'}
+		<p class="rounded border p-3 text-sm text-muted-foreground">Members can finish password and recovery setup now. Mail still reaches the existing provider; this client's sending and receiving start after migration.</p>
+	{/if}
 	<DataTable
 		{columns}
 		data={data.members}

@@ -133,7 +133,7 @@ export const organization = sqliteTable(
     // cache only the zone id and the onboarding lifecycle status here.
     // Live DKIM/sending state is fetched from the CF API for settings screens,
     // never persisted. status: pending_zone | pending_nameservers | wiring |
-    // active | error.
+    // staged (accounts prepared; mail remains at the old provider) | active | error.
     zoneId: text("zone_id"),
     status: text("status").default("pending_zone").notNull(),
   },
