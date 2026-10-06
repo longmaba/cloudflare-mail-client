@@ -137,6 +137,41 @@ test('migration preview is read-only, snapshots fresh DNS and seals private cons
   assert.equal(migrationPreview(saved.basename, saved.journal).confirm, saved.journal.digest);
 });
 
+test('flattened apex website CNAME and authoritative NS survive cutover and rollback unchanged', async t => {
+  const f = await fixture(t);
+  const website = [
+    { id: dnsId(9), type: 'CNAME', name: f.config.zoneName, content: 'site.onrender.com', proxied: true, ttl: 1, settings: { flatten_cname: false } },
+    { id: dnsId(10), type: 'NS', name: f.config.zoneName, content: 'ns.provider.test', ttl: 3600 },
+  ];
+  f.state.records.push(...clone(website));
+  const saved = await f.plan();
+  await f.apply(saved);
+  assert.deepEqual(f.state.records.filter(record => website.some(row => row.id === record.id)), website);
+  await f.rollback(saved);
+  assert.deepEqual(f.state.records.filter(record => website.some(row => row.id === record.id)), website);
+});
+
+test('apex website CNAME drift still blocks cutover before any provider writes', async t => {
+  const f = await fixture(t);
+  const website = { id: dnsId(9), type: 'CNAME', name: f.config.zoneName, content: 'site.onrender.com', proxied: true, ttl: 1 };
+  f.state.records.push(website);
+  const saved = await f.plan();
+  website.content = 'other-site.onrender.com';
+  await assert.rejects(f.apply(saved), /Unrelated DNS changed/);
+  assert.deepEqual(f.commits, []);
+});
+
+test('CNAME and NS conflicts at native sending or DMARC hosts block the read-only preview', async t => {
+  for (const type of ['CNAME', 'NS']) {
+    for (const name of ['cf-bounce.example.com', 'cf-bounce._domainkey.example.com', '_dmarc.example.com']) {
+      const f = await fixture(t);
+      f.state.records.push({ id: dnsId(9), type, name, content: 'foreign.provider.test', ttl: 1 });
+      await assert.rejects(f.plan(), /aliased or delegated/);
+      assert.deepEqual(f.commits, []);
+    }
+  }
+});
+
 test('apply requires exact consent and a nonexpired, nonfuture plan before provider writes', async t => {
   const f = await fixture(t), saved = await f.plan();
   for (const confirm of [undefined, '', 'a'.repeat(64), saved.journal.digest.toUpperCase()]) {

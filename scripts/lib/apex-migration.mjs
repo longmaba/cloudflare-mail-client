@@ -31,7 +31,10 @@ function assertSnapshot(config, snapshot) {
   if (snapshot.scopes.MAIL_DOMAIN !== config.mailDomain || snapshot.scopes.MAIL_ROUTING_MODE !== 'manual' || snapshot.scopes.MAIL_STAGING_DOMAIN !== config.zoneName || (snapshot.scopes.MAIL_MIGRATED_DOMAIN && snapshot.scopes.MAIL_MIGRATED_DOMAIN !== config.zoneName)) throw new Error('Live mail scopes differ from the saved pilot/preparation.');
   if (!snapshot.routingEnabled) throw new Error('The pilot has not enabled Email Routing for this zone. Repair and verify pilot onboarding first.');
   if (snapshot.catchAll?.enabled) throw new Error('Disable or deliberately resolve the existing apex catch-all before planning. Migration uses exact provisioned recipient rules only.');
-  if (snapshot.records.some(record => ['CNAME', 'NS'].includes(record.type) && [config.zoneName, ...senderNames(config.zoneName)].includes(dnsName(record.name)) && !(record.type === 'NS' && dnsName(record.name) === config.zoneName))) throw new Error('Mail hosts are aliased or delegated. Resolve their DNS conflicts before migration.');
+  // Cloudflare flattens zone-apex CNAMEs automatically; an apex website alias
+  // and authoritative NS do not conflict with mail. Sender hosts still must
+  // have their own MX/TXT records and cannot be aliased or delegated.
+  if (snapshot.records.some(record => ['CNAME', 'NS'].includes(record.type) && senderNames(config.zoneName).includes(dnsName(record.name)))) throw new Error('Mail hosts are aliased or delegated. Resolve their DNS conflicts before migration.');
   recipientRules(snapshot.recipients, snapshot.rules, config.zoneName, config.resourceNames.inbound);
 }
 

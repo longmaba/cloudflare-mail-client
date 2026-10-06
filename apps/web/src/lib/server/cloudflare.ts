@@ -645,6 +645,8 @@ export async function inspectMigratedMail(zoneId: string, domain: string): Promi
     });
     const requiredMx = required.filter(record => record.type === 'MX');
     const current = await exactDnsRecords(zoneId, domain);
+    // The scope above is the zone apex: Cloudflare flattens apex CNAMEs,
+    // and authoritative NS records do not delegate this receiving host.
     const mx = current.filter(record => record.type === 'MX');
     const spf = current.filter(record => record.type === 'TXT' && isSpfCandidate(record.content));
     const deniedRouting = spf.some(record => txtValue(record.content ?? '').split(/\s+/)
@@ -652,7 +654,6 @@ export async function inspectMigratedMail(zoneId: string, domain: string): Promi
     if (!requiredMx.length || required.filter(record => record.type === 'TXT').length !== 1 ||
         new Set(requiredMx.map(record => `${dnsContent(record.content)}:${record.priority}`)).size !== requiredMx.length ||
         mx.length !== requiredMx.length || requiredMx.some(wanted => !mx.some(record => mailDnsMatches(record, wanted))) ||
-        current.some(record => record.type === 'CNAME' || record.type === 'NS') ||
         spf.length !== 1 || deniedRouting || !authorizesRouting(spf[0].content ?? '')) {
       throw new MailSetupError('The unlocked migrated MX/SPF differs from the required receiving configuration. Run doctor or resume the migration.');
     }

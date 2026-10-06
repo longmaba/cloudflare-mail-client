@@ -1,6 +1,6 @@
 # Release verification
 
-Release candidate: `v0.1.0-rc.7`. Verification date: 2026-10-06.
+Release candidate: `v0.1.0-rc.8`. Verification date: 2026-10-06.
 
 ## Automated evidence
 
@@ -10,8 +10,8 @@ On Windows with Node 24.12.0 and pnpm 10.26.2:
 | --- | --- |
 | Frozen workspace and infrastructure installs | Passed |
 | Workspace type and Svelte checks | Passed, zero errors and warnings |
-| Application tests | 87 files, 938 tests passed |
-| Portable installer tests | 129 tests passed; migration planning/apply/rollback, snapshots/bindings, credential replacement, API adapters and pre-upgrade restore points |
+| Application tests | 87 files, 941 tests passed |
+| Portable installer tests | 132 tests passed; migration planning/apply/rollback, snapshots/bindings, credential replacement, API adapters and pre-upgrade restore points |
 | Infrastructure TypeScript check | Passed |
 | Production Cloudflare build | Passed |
 | Local D1 migrations | All migrations through `0058` applied |
@@ -33,10 +33,15 @@ Unlocked migrated routing is accepted only with separate DNS validation; the
 application checks the exact supplied MX and an authorized SPF policy without
 changing records. Fixtures contain no live credentials or private mail.
 
-Live migration preview was exercised read-only. It correctly refused cutover
-because two production administrators had not enrolled TOTP or completed
-onboarding. The member account had completed onboarding. Existing Google apex
-MX remained unchanged; apex sending registration and migration were not run.
+Live readiness checks confirmed that all three production owners completed
+onboarding, including authenticator TOTP for both administrators. The read-only
+RC7 preview then rejected the existing apex website CNAME too broadly. RC8
+permits Cloudflare's automatically flattened zone-apex CNAME and authoritative
+NS while preserving them as unrelated DNS; sender and DMARC host alias conflicts
+still block migration. Regression tests preserve the website through apply and
+rollback and reject website drift before writes. Existing Google apex MX remained
+unchanged during this correction; apex sending registration and migration were
+not run for this release verification.
 The current merged public SPF policy resolved to four nested DNS lookups during
 preflight. Actual apex send/receive and post-cutover authentication remain pending.
 

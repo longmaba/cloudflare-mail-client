@@ -695,6 +695,29 @@ describe('completed migration scope', () => {
     expect(fixture.api.emailSending.subdomains.create).not.toHaveBeenCalled();
   });
 
+  it.each(['proxied apex CNAME', 'DNS-only apex CNAME', 'authoritative apex NS'])('preserves %s while inspecting unlocked migrated mail', async (recordType) => {
+    fixture.env.MAIL_MIGRATED_DOMAIN = 'example.com';
+    fixture.api.emailRouting.get.mockResolvedValue({ enabled: true, status: 'unlocked' });
+    fixture.api.emailSending.subdomains.list.mockImplementation(() => ({ async *[Symbol.asyncIterator]() {
+      yield { ...sendingIdentity, name: 'example.com' };
+    } }));
+    const unrelated = recordType === 'authoritative apex NS'
+      ? { id: 'apex-ns', type: 'NS', name: 'example.com', content: 'ns.cloudflare.com' }
+      : { id: 'apex-website', type: 'CNAME', name: 'example.com', content: 'website.onrender.com',
+        proxied: recordType === 'proxied apex CNAME', settings: { flatten_cname: false } };
+    records = [...expected.map((record, index) => ({ id: `migrated-${index}`, ...record })), unrelated];
+    const before = structuredClone(records);
+
+    await inspectMigratedMail('zone', 'example.com');
+
+    expect(records).toEqual(before);
+    expect(fixture.api.dns.records.create).not.toHaveBeenCalled();
+    expect(fixture.api.dns.records.update).not.toHaveBeenCalled();
+    expect(fixture.api.dns.records.delete).not.toHaveBeenCalled();
+    expect(fixture.api.emailRouting.dns.create).not.toHaveBeenCalled();
+    expect(fixture.api.emailSending.subdomains.create).not.toHaveBeenCalled();
+  });
+
   it.each(['provider MX', 'wrong priority', 'missing MX', 'duplicate MX', 'unauthorized SPF', 'duplicate SPF', 'terminal before include', 'denied include'])('rejects unlocked migrated DNS drift: %s', async (drift) => {
     fixture.env.MAIL_MIGRATED_DOMAIN = 'example.com';
     fixture.api.emailRouting.get.mockResolvedValue({ enabled: true, status: 'unlocked' });
